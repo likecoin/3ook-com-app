@@ -13,7 +13,8 @@
       "bundleIdentifier": "land.liker.book3app",
       "infoPlist": {
         "CFBundleDisplayName": "3ook Reader",
-        "ITSAppUsesNonExemptEncryption": false
+        "ITSAppUsesNonExemptEncryption": false,
+        "UIBackgroundModes": ["audio"]
       }
     },
     "android": {

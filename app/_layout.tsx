@@ -1,6 +1,8 @@
 import * as Sentry from "@sentry/react-native";
 import { Slot } from "expo-router";
 
+import { registerPlaybackService } from "../services/audio-bridge";
+
 Sentry.init({
   dsn: "https://316d95879bd0e47063df647af48ceb1f@o149940.ingest.us.sentry.io/4510799071608832",
 
@@ -14,6 +16,8 @@ Sentry.init({
   // uncomment the line below to enable Spotlight (https://spotlightjs.com)
   // spotlight: __DEV__,
 });
+
+registerPlaybackService();
 
 export default function RootLayout() {
   return <Slot />;
