@@ -35,37 +35,38 @@ export default function App() {
 
   const handleMessage = useCallback(
     async (event: WebViewMessageEvent) => {
-      let msg: { type: string; [key: string]: unknown };
       try {
-        msg = JSON.parse(event.nativeEvent.data);
-      } catch {
-        return;
-      }
+        const msg: { type: string; [key: string]: unknown } = JSON.parse(
+          event.nativeEvent.data
+        );
 
-      switch (msg.type) {
-        case 'load':
-          await handleLoad(msg as unknown as LoadMessage);
-          break;
-        case 'pause':
-          await handlePause();
-          break;
-        case 'resume':
-          await handleResume();
-          break;
-        case 'stop':
-          await handleStop();
-          break;
-        case 'skipTo':
-          if (typeof msg.index === 'number') {
-            await handleSkipTo(msg.index);
-          }
-          break;
-        case 'setRate':
-          await handleSetRate(msg.rate as number);
-          break;
-        case 'seekTo':
-          await handleSeekTo(msg.position as number);
-          break;
+        switch (msg.type) {
+          case 'load':
+            await handleLoad(msg as unknown as LoadMessage);
+            break;
+          case 'pause':
+            await handlePause();
+            break;
+          case 'resume':
+            await handleResume();
+            break;
+          case 'stop':
+            await handleStop();
+            break;
+          case 'skipTo':
+            if (typeof msg.index === 'number') {
+              await handleSkipTo(msg.index);
+            }
+            break;
+          case 'setRate':
+            await handleSetRate(msg.rate as number);
+            break;
+          case 'seekTo':
+            await handleSeekTo(msg.position as number);
+            break;
+        }
+      } catch (e) {
+        console.warn('[onMessage]', e);
       }
     },
     []
@@ -82,7 +83,11 @@ export default function App() {
           style={styles.webview}
           userAgent={`3ook-com-app/${packageJson.version}`}
           sharedCookiesEnabled={true}
+          mediaPlaybackRequiresUserAction={false}
+          allowsInlineMediaPlayback={true}
           onMessage={handleMessage}
+          onError={(e) => console.warn('[WebView error]', e.nativeEvent)}
+          onHttpError={(e) => console.warn('[WebView HTTP error]', e.nativeEvent)}
         />
       </View>
     </>

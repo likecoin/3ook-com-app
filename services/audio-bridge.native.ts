@@ -43,6 +43,7 @@ export async function setupPlayer(): Promise<void> {
 }
 
 export async function handleLoad(msg: LoadMessage): Promise<void> {
+  await setupPlayer();
   await TrackPlayer.reset();
   const tracks = msg.tracks.map((t) => ({
     id: String(t.index),
