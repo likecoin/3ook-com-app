@@ -1,3 +1,4 @@
+import CookieManager from '@react-native-cookies/cookies';
 import TrackPlayer, {
   Capability,
   Event,
@@ -61,12 +62,26 @@ export function handleLoad(msg: LoadMessage): Promise<void> {
 async function doLoad(msg: LoadMessage): Promise<void> {
   await setupPlayer();
   await TrackPlayer.reset();
+  const cookieUrl = msg.tracks[0]?.url;
+  let cookieHeader = '';
+  if (cookieUrl) {
+    try {
+      const cookies = await CookieManager.get(cookieUrl);
+      cookieHeader = Object.entries(cookies)
+        .map(([name, cookie]) => `${name}=${cookie.value}`)
+        .join('; ');
+    } catch {
+      // Cookies unavailable — proceed without them
+    }
+  }
+  const headers = cookieHeader ? { Cookie: cookieHeader } : undefined;
   const tracks = msg.tracks.map((t) => ({
     id: String(t.index),
     url: t.url,
     title: t.title || msg.metadata.bookTitle,
     artist: msg.metadata.authorName,
     artwork: msg.metadata.coverUrl,
+    headers,
   }));
   await TrackPlayer.add(tracks);
   if (msg.startIndex > 0) {
