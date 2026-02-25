@@ -12,6 +12,7 @@
       "supportsTablet": true,
       "bundleIdentifier": "land.liker.book3app",
       "infoPlist": {
+        "CFBundleDisplayName": "3ook Reader",
         "ITSAppUsesNonExemptEncryption": false
       }
     },
