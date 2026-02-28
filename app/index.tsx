@@ -59,10 +59,14 @@ export default function App() {
             }
             break;
           case 'setRate':
-            await handleSetRate(msg.rate as number);
+            if (typeof msg.rate === 'number') {
+              await handleSetRate(msg.rate);
+            }
             break;
           case 'seekTo':
-            await handleSeekTo(msg.position as number);
+            if (typeof msg.position === 'number') {
+              await handleSeekTo(msg.position);
+            }
             break;
         }
       } catch (e) {

@@ -1,12 +1,9 @@
-import CookieManager from '@react-native-cookies/cookies';
-import TrackPlayer, {
-  Capability,
-  Event,
-  type PlaybackActiveTrackChangedEvent,
-  type PlaybackErrorEvent,
-  type PlaybackQueueEndedEvent,
-  type PlaybackState,
-} from 'react-native-track-player';
+import CookieManager from '@preeternal/react-native-cookie-manager';
+import {
+  createAudioPlayer,
+  setAudioModeAsync,
+  type AudioPlayer,
+} from 'expo-audio';
 
 type SendToWebView = (data: object) => void;
 
@@ -27,31 +24,53 @@ export interface LoadMessage {
   };
 }
 
-let setupPromise: Promise<void> | null = null;
+interface QueueTrack {
+  uri: string;
+  headers?: Record<string, string>;
+  title: string;
+  artist: string;
+  artworkUrl: string;
+}
+
+let player: AudioPlayer | null = null;
+let queue: QueueTrack[] = [];
+let currentIndex = -1;
+let currentRate = 1;
+let lastFinishTime = 0;
 let loadPromise: Promise<void> = Promise.resolve();
+let notifyWebView: SendToWebView | null = null;
+
+function getOrCreatePlayer(): AudioPlayer {
+  if (!player) {
+    player = createAudioPlayer();
+  }
+  return player;
+}
+
+function playTrack(p: AudioPlayer, track: QueueTrack): void {
+  p.replace({ uri: track.uri, headers: track.headers });
+  p.setPlaybackRate(currentRate);
+  p.setActiveForLockScreen(true, {
+    title: track.title,
+    artist: track.artist,
+    artworkUrl: track.artworkUrl,
+  });
+  p.play();
+}
+
+let setupDone: Promise<void> | null = null;
 
 export function setupPlayer(): Promise<void> {
-  if (!setupPromise) {
-    setupPromise = TrackPlayer.setupPlayer()
-      .then(() =>
-        TrackPlayer.updateOptions({
-          capabilities: [
-            Capability.Play,
-            Capability.Pause,
-            Capability.SkipToNext,
-            Capability.SkipToPrevious,
-          ],
-          compactCapabilities: [Capability.Play, Capability.Pause],
-        })
-      )
-      .catch((e) => {
-        if (!(e as Error)?.message?.includes('already been initialized')) {
-          setupPromise = null;
-          throw e;
-        }
-      });
+  if (!setupDone) {
+    setupDone = setAudioModeAsync({
+      playsInSilentMode: true,
+      shouldPlayInBackground: true,
+      interruptionMode: 'doNotMix',
+    }).then(() => {
+      getOrCreatePlayer();
+    });
   }
-  return setupPromise;
+  return setupDone;
 }
 
 export function handleLoad(msg: LoadMessage): Promise<void> {
@@ -61,7 +80,8 @@ export function handleLoad(msg: LoadMessage): Promise<void> {
 
 async function doLoad(msg: LoadMessage): Promise<void> {
   await setupPlayer();
-  await TrackPlayer.reset();
+  const p = getOrCreatePlayer();
+
   const cookieUrl = msg.tracks[0]?.url;
   let cookieHeader = '';
   if (cookieUrl) {
@@ -75,98 +95,106 @@ async function doLoad(msg: LoadMessage): Promise<void> {
     }
   }
   const headers = cookieHeader ? { Cookie: cookieHeader } : undefined;
-  const tracks = msg.tracks.map((t) => ({
-    id: String(t.index),
-    url: t.url,
+
+  queue = msg.tracks.map((t) => ({
+    uri: t.url,
+    headers,
     title: t.title || msg.metadata.bookTitle,
     artist: msg.metadata.authorName,
-    artwork: msg.metadata.coverUrl,
-    headers,
+    artworkUrl: msg.metadata.coverUrl,
   }));
-  await TrackPlayer.add(tracks);
-  if (msg.startIndex > 0) {
-    await TrackPlayer.skip(msg.startIndex);
-  }
-  await TrackPlayer.setRate(msg.rate);
-  await TrackPlayer.play();
+
+  currentIndex = msg.startIndex;
+  currentRate = msg.rate;
+  lastFinishTime = 0;
+
+  playTrack(p, queue[currentIndex]);
 }
 
 export async function handlePause(): Promise<void> {
-  await TrackPlayer.pause();
+  player?.pause();
 }
 
 export async function handleResume(): Promise<void> {
-  await TrackPlayer.play();
+  player?.play();
 }
 
 export async function handleStop(): Promise<void> {
-  await TrackPlayer.reset();
+  if (player) {
+    player.pause();
+    player.setActiveForLockScreen(false);
+    player.replace(null);
+    currentIndex = -1;
+    queue = [];
+  }
 }
 
 export async function handleSkipTo(index: number): Promise<void> {
-  await TrackPlayer.skip(index);
-}
-
-export async function handleSetRate(rate: number): Promise<void> {
-  await TrackPlayer.setRate(rate);
-}
-
-export async function handleSeekTo(position: number): Promise<void> {
-  await TrackPlayer.seekTo(position);
-}
-
-export function registerPlaybackService() {
-  TrackPlayer.registerPlaybackService(() => async () => {
-    TrackPlayer.addEventListener(Event.RemotePlay, () => TrackPlayer.play());
-    TrackPlayer.addEventListener(Event.RemotePause, () => TrackPlayer.pause());
-    TrackPlayer.addEventListener(Event.RemoteNext, () => TrackPlayer.skipToNext());
-    TrackPlayer.addEventListener(Event.RemotePrevious, () => TrackPlayer.skipToPrevious());
+  if (!player || index < 0 || index >= queue.length) return;
+  const lastIndex = currentIndex;
+  currentIndex = index;
+  playTrack(player, queue[currentIndex]);
+  notifyWebView?.({
+    type: 'trackChanged',
+    index: currentIndex,
+    lastIndex,
   });
 }
 
-export function registerEventListeners(sendToWebView: SendToWebView) {
-  const subs = [
-    TrackPlayer.addEventListener(
-      Event.PlaybackActiveTrackChanged,
-      (event: PlaybackActiveTrackChangedEvent) => {
-        if (typeof event.index !== 'number') return;
-        sendToWebView({
-          type: 'trackChanged',
-          index: event.index,
-          lastIndex: event.lastIndex,
-        });
-      }
-    ),
-    TrackPlayer.addEventListener(
-      Event.PlaybackQueueEnded,
-      (event: PlaybackQueueEndedEvent) => {
-        sendToWebView({
-          type: 'queueEnded',
-          track: event.track,
-          position: event.position,
-        });
-      }
-    ),
-    TrackPlayer.addEventListener(
-      Event.PlaybackState,
-      (event: PlaybackState) => {
-        sendToWebView({
-          type: 'playbackState',
-          state: event.state,
-        });
-      }
-    ),
-    TrackPlayer.addEventListener(
-      Event.PlaybackError,
-      (event: PlaybackErrorEvent) => {
-        sendToWebView({
-          type: 'error',
-          message: event.message,
-          code: event.code,
-        });
-      }
-    ),
-  ];
+export async function handleSetRate(rate: number): Promise<void> {
+  currentRate = rate;
+  player?.setPlaybackRate(rate);
+}
 
-  return () => subs.forEach((s) => s.remove());
+export async function handleSeekTo(position: number): Promise<void> {
+  await player?.seekTo(position);
+}
+
+export function registerEventListeners(sendToWebView: SendToWebView) {
+  notifyWebView = sendToWebView;
+  const p = getOrCreatePlayer();
+
+  const sub = p.addListener('playbackStatusUpdate', (status) => {
+    // Map expo-audio status to RNTP-compatible state strings
+    let state: string;
+    if (!status.isLoaded) {
+      state = 'loading';
+    } else if (status.isBuffering) {
+      state = 'buffering';
+    } else if (status.playing) {
+      state = 'playing';
+    } else {
+      state = 'paused';
+    }
+    notifyWebView?.({ type: 'playbackState', state });
+
+    // Auto-advance on track finish (debounce for Android duplicate events)
+    if (status.didJustFinish) {
+      const now = Date.now();
+      if (now - lastFinishTime < 500) return;
+      lastFinishTime = now;
+
+      const lastIndex = currentIndex;
+      if (currentIndex < queue.length - 1) {
+        currentIndex++;
+        playTrack(p, queue[currentIndex]);
+        notifyWebView?.({
+          type: 'trackChanged',
+          index: currentIndex,
+          lastIndex,
+        });
+      } else {
+        notifyWebView?.({
+          type: 'queueEnded',
+          track: lastIndex,
+          position: status.currentTime,
+        });
+      }
+    }
+  });
+
+  return () => {
+    sub.remove();
+    notifyWebView = null;
+  };
 }

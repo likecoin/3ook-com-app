@@ -17,5 +17,4 @@ export function handleStop(): Promise<void>;
 export function handleSkipTo(index: number): Promise<void>;
 export function handleSetRate(rate: number): Promise<void>;
 export function handleSeekTo(position: number): Promise<void>;
-export function registerPlaybackService(): void;
 export function registerEventListeners(sendToWebView: (data: object) => void): () => void;
