@@ -15,6 +15,7 @@
         "CFBundleDisplayName": "3ook Reader",
         "ITSAppUsesNonExemptEncryption": false,
         "UIBackgroundModes": ["audio"],
+        "NSMicrophoneUsageDescription": "This app uses your microphone to record your voice and create a custom voice for the text-to-speech feature.",
         "NSAppTransportSecurity": {
           "NSAllowsLocalNetworking": true,
           "NSAllowsArbitraryLoadsForMedia": true
