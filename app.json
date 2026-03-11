@@ -16,6 +16,7 @@
         "ITSAppUsesNonExemptEncryption": false,
         "UIBackgroundModes": ["audio"],
         "NSMicrophoneUsageDescription": "This app uses your microphone to record your voice and create a custom voice for the text-to-speech feature.",
+        "NSCameraUsageDescription": "This app uses the camera to take a profile photo and capture photos for customer service requests.",
         "NSAppTransportSecurity": {
           "NSAllowsLocalNetworking": true,
           "NSAllowsArbitraryLoadsForMedia": true
