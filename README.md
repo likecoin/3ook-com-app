@@ -1,50 +1,40 @@
-# Welcome to your Expo app 👋
+# 3ook.com App
 
-This is an [Expo](https://expo.dev) project created with [`create-expo-app`](https://www.npmjs.com/package/create-expo-app).
+Native mobile app for [3ook.com](https://3ook.com) — a decentralized digital bookstore where books are readable, listenable, and ownable (可讀、可聽、可擁有).
 
-## Get started
+This is a WebView shell built with [Expo](https://expo.dev) that wraps the 3ook.com web app and adds native audio playback with background audio, lock screen controls, and queue management via `expo-audio`.
 
-1. Install dependencies
+**Tech stack:** Expo SDK 55, React Native 0.83, React 19.2, TypeScript, expo-audio, expo-router, Sentry.
 
-   ```bash
-   npm install
-   ```
+[App Store](https://apps.apple.com/hk/app/id6757783481) · [Google Play](https://play.google.com/store/apps/details?id=land.liker.book3app)
 
-2. Start the app
-
-   ```bash
-   npx expo start
-   ```
-
-In the output, you'll find options to open the app in a
-
-- [development build](https://docs.expo.dev/develop/development-builds/introduction/)
-- [Android emulator](https://docs.expo.dev/workflow/android-studio-emulator/)
-- [iOS simulator](https://docs.expo.dev/workflow/ios-simulator/)
-- [Expo Go](https://expo.dev/go), a limited sandbox for trying out app development with Expo
-
-You can start developing by editing the files inside the **app** directory. This project uses [file-based routing](https://docs.expo.dev/router/introduction).
-
-## Get a fresh project
-
-When you're ready, run:
+## Setup
 
 ```bash
-npm run reset-project
+npm install
+npx expo prebuild --clean
 ```
 
-This command will move the starter code to the **app-example** directory and create a blank **app** directory where you can start developing.
+## Development
 
-## Learn more
+```bash
+npx expo run:ios       # Build and run on iOS simulator
+npx expo run:android   # Build and run on Android emulator
+npx expo start         # Start Metro dev server (for dev client)
+```
 
-To learn more about developing your project with Expo, look at the following resources:
+## Lint & Typecheck
 
-- [Expo documentation](https://docs.expo.dev/): Learn fundamentals, or go into advanced topics with our [guides](https://docs.expo.dev/guides).
-- [Learn Expo tutorial](https://docs.expo.dev/tutorial/introduction/): Follow a step-by-step tutorial where you'll create a project that runs on Android, iOS, and the web.
+```bash
+npx expo lint
+npx tsc --noEmit
+```
 
-## Join the community
+## EAS Build
 
-Join our community of developers creating universal apps.
+```bash
+eas build --profile development --platform ios
+eas build --profile production --platform all
+```
 
-- [Expo on GitHub](https://github.com/expo/expo): View our open source platform and contribute.
-- [Discord community](https://chat.expo.dev): Chat with Expo users and ask questions.
+See `eas.json` for build profiles.
