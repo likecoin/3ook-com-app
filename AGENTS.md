@@ -36,7 +36,7 @@ The web app itself lives in a separate repo (`liker-land-v3`, a Nuxt 3 PWA). Thi
 
 - **Platform-split modules**: `audio-bridge` uses `.native.ts` / `.web.ts` suffixes with a shared `.d.ts`. Metro resolves the correct file per platform.
 - **WebView ↔ Native bridge**: Web→Native via `postMessage` JSON. Native→Web via `injectJavaScript` dispatching `CustomEvent('nativeAudioEvent')`.
-- **Cookie forwarding**: Audio URLs require Cloudflare Access cookies. The bridge reads cookies via `react-native-cookie-manager` and passes them as request headers to `expo-audio`.
+- **Cookie forwarding**: Audio URLs require Cloudflare Access cookies. The bridge reads cookies via `@preeternal/react-native-cookie-manager` and passes them as request headers to `expo-audio`.
 
 ### Message protocol
 
