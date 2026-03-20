@@ -39,6 +39,19 @@ let currentRate = 1;
 let lastFinishTime = 0;
 let loadPromise: Promise<void> = Promise.resolve();
 let notifyWebView: SendToWebView | null = null;
+let lastSentState = '';
+
+// TODO: Remove this once the blocking param is no longer used in the web app.
+// This is to support streaming without breaking older versions of the app.
+function stripBlockingParam(url: string): string {
+  try {
+    const u = new URL(url);
+    u.searchParams.delete('blocking');
+    return u.toString();
+  } catch {
+    return url;
+  }
+}
 
 function getOrCreatePlayer(): AudioPlayer {
   if (!player) {
@@ -97,7 +110,7 @@ async function doLoad(msg: LoadMessage): Promise<void> {
   const headers = cookieHeader ? { Cookie: cookieHeader } : undefined;
 
   queue = msg.tracks.map((t) => ({
-    uri: t.url,
+    uri: stripBlockingParam(t.url),
     headers,
     title: t.title || msg.metadata.bookTitle,
     artist: msg.metadata.authorName,
@@ -111,26 +124,26 @@ async function doLoad(msg: LoadMessage): Promise<void> {
   playTrack(p, queue[currentIndex]);
 }
 
-export async function handlePause(): Promise<void> {
+export function handlePause(): void {
   player?.pause();
 }
 
-export async function handleResume(): Promise<void> {
+export function handleResume(): void {
   player?.play();
 }
 
-export async function handleStop(): Promise<void> {
+export function handleStop(): void {
   if (player) {
     player.pause();
     player.setActiveForLockScreen(false);
-    player.replace(null);
     currentIndex = -1;
     queue = [];
   }
 }
 
-export async function handleSkipTo(index: number): Promise<void> {
+export function handleSkipTo(index: number): void {
   if (!player || index < 0 || index >= queue.length) return;
+
   const lastIndex = currentIndex;
   currentIndex = index;
   playTrack(player, queue[currentIndex]);
@@ -141,7 +154,7 @@ export async function handleSkipTo(index: number): Promise<void> {
   });
 }
 
-export async function handleSetRate(rate: number): Promise<void> {
+export function handleSetRate(rate: number): void {
   currentRate = rate;
   player?.setPlaybackRate(rate);
 }
@@ -166,7 +179,10 @@ export function registerEventListeners(sendToWebView: SendToWebView) {
     } else {
       state = 'paused';
     }
-    notifyWebView?.({ type: 'playbackState', state });
+    if (state !== lastSentState) {
+      lastSentState = state;
+      notifyWebView?.({ type: 'playbackState', state });
+    }
 
     // Auto-advance on track finish (debounce for Android duplicate events)
     if (status.didJustFinish) {
