@@ -46,7 +46,7 @@ let downloadAbort: AbortController | null = null;
 let pendingPause = false;
 
 // TODO: Remove this once the blocking param is no longer used in the web app.
-// This is to support streaming without breaking older version of app.
+// This is to support streaming without breaking older versions of the app.
 function stripBlockingParam(url: string): string {
   try {
     const u = new URL(url);
@@ -124,7 +124,8 @@ async function downloadAndPlay(
   onBeforePlay?: () => void,
 ): Promise<void> {
   downloadAbort?.abort();
-  cleanupTempFiles();
+  const oldFiles = [...tempFiles];
+  tempFiles = [];
   const abort = new AbortController();
   downloadAbort = abort;
   pendingPause = false;
@@ -136,12 +137,27 @@ async function downloadAndPlay(
   });
   notifyWebView?.({ type: 'playbackState', state: 'buffering' });
 
-  const localUri = await downloadTrack(track, index, abort.signal);
-  if (abort.signal.aborted) return;
+  try {
+    const localUri = await downloadTrack(track, index, abort.signal);
+    if (abort.signal.aborted) return;
 
-  onBeforePlay?.();
-  if (pendingPause) return;
-  playTrack(p, track, localUri);
+    onBeforePlay?.();
+    if (pendingPause) return;
+    playTrack(p, track, localUri);
+
+    // Clean up old temp files only after the new track is loaded into the player
+    for (const f of oldFiles) {
+      try {
+        f.delete();
+      } catch {
+        // Best-effort cleanup
+      }
+    }
+  } finally {
+    if (downloadAbort === abort) {
+      downloadAbort = null;
+    }
+  }
 }
 
 let setupDone: Promise<void> | null = null;
@@ -219,13 +235,13 @@ export async function handleResume(): Promise<void> {
 
 export async function handleStop(): Promise<void> {
   downloadAbort?.abort();
-  cleanupTempFiles();
   if (player) {
     player.pause();
     player.setActiveForLockScreen(false);
     currentIndex = -1;
     queue = [];
   }
+  cleanupTempFiles();
 }
 
 export async function handleSkipTo(index: number): Promise<void> {
