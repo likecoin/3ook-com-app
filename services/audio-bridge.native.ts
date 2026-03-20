@@ -4,6 +4,7 @@ import {
   setAudioModeAsync,
   type AudioPlayer,
 } from 'expo-audio';
+import { File, Paths } from 'expo-file-system';
 
 type SendToWebView = (data: object) => void;
 
@@ -40,6 +41,22 @@ let lastFinishTime = 0;
 let loadPromise: Promise<void> = Promise.resolve();
 let notifyWebView: SendToWebView | null = null;
 
+let tempFiles: File[] = [];
+let downloadAbort: AbortController | null = null;
+let pendingPause = false;
+
+// TODO: Remove this once the blocking param is no longer used in the web app.
+// This is to support streaming without breaking older version of app.
+function stripBlockingParam(url: string): string {
+  try {
+    const u = new URL(url);
+    u.searchParams.delete('blocking');
+    return u.toString();
+  } catch {
+    return url;
+  }
+}
+
 function getOrCreatePlayer(): AudioPlayer {
   if (!player) {
     player = createAudioPlayer();
@@ -47,8 +64,45 @@ function getOrCreatePlayer(): AudioPlayer {
   return player;
 }
 
-function playTrack(p: AudioPlayer, track: QueueTrack): void {
-  p.replace({ uri: track.uri, headers: track.headers });
+function cleanupTempFiles(): void {
+  for (const f of tempFiles) {
+    try {
+      f.delete();
+    } catch {
+      // Best-effort cleanup
+    }
+  }
+  tempFiles = [];
+}
+
+async function downloadTrack(
+  track: QueueTrack,
+  index: number,
+  abortSignal?: AbortSignal,
+): Promise<string> {
+  const ext = track.uri.match(/\.(\w+)(\?|$)/)?.[1] || 'mp3';
+  const dest = new File(Paths.cache, `track-${index}-${Date.now()}.${ext}`);
+  const downloaded = await File.downloadFileAsync(track.uri, dest, {
+    headers: track.headers,
+  });
+  if (abortSignal?.aborted) {
+    try {
+      downloaded.delete();
+    } catch {
+      // Best-effort cleanup
+    }
+    return downloaded.uri;
+  }
+  tempFiles.push(downloaded);
+  return downloaded.uri;
+}
+
+function playTrack(p: AudioPlayer, track: QueueTrack, localUri?: string): void {
+  if (localUri) {
+    p.replace({ uri: localUri });
+  } else {
+    p.replace({ uri: track.uri, headers: track.headers });
+  }
   p.setPlaybackRate(currentRate);
   p.setActiveForLockScreen(true, {
     title: track.title,
@@ -56,6 +110,38 @@ function playTrack(p: AudioPlayer, track: QueueTrack): void {
     artworkUrl: track.artworkUrl,
   });
   p.play();
+}
+
+/**
+ * Cancel any in-flight download, clean up temp files, download the given track,
+ * and play it. Sets lock screen metadata and emits buffering state immediately.
+ * Calls `onBeforePlay` (e.g. to emit trackChanged) after download but before play.
+ */
+async function downloadAndPlay(
+  p: AudioPlayer,
+  track: QueueTrack,
+  index: number,
+  onBeforePlay?: () => void,
+): Promise<void> {
+  downloadAbort?.abort();
+  cleanupTempFiles();
+  const abort = new AbortController();
+  downloadAbort = abort;
+  pendingPause = false;
+
+  p.setActiveForLockScreen(true, {
+    title: track.title,
+    artist: track.artist,
+    artworkUrl: track.artworkUrl,
+  });
+  notifyWebView?.({ type: 'playbackState', state: 'buffering' });
+
+  const localUri = await downloadTrack(track, index, abort.signal);
+  if (abort.signal.aborted) return;
+
+  onBeforePlay?.();
+  if (pendingPause) return;
+  playTrack(p, track, localUri);
 }
 
 let setupDone: Promise<void> | null = null;
@@ -97,7 +183,7 @@ async function doLoad(msg: LoadMessage): Promise<void> {
   const headers = cookieHeader ? { Cookie: cookieHeader } : undefined;
 
   queue = msg.tracks.map((t) => ({
-    uri: t.url,
+    uri: stripBlockingParam(t.url),
     headers,
     title: t.title || msg.metadata.bookTitle,
     artist: msg.metadata.authorName,
@@ -108,22 +194,35 @@ async function doLoad(msg: LoadMessage): Promise<void> {
   currentRate = msg.rate;
   lastFinishTime = 0;
 
-  playTrack(p, queue[currentIndex]);
+  await downloadAndPlay(p, queue[currentIndex], currentIndex);
 }
 
 export async function handlePause(): Promise<void> {
-  player?.pause();
+  if (player) {
+    player.pause();
+    // Flag pause-during-download so we don't auto-play after download completes
+    if (downloadAbort && !downloadAbort.signal.aborted) {
+      pendingPause = true;
+    }
+  }
 }
 
 export async function handleResume(): Promise<void> {
-  player?.play();
+  if (pendingPause && player && currentIndex >= 0 && currentIndex < queue.length) {
+    pendingPause = false;
+    await downloadAndPlay(player, queue[currentIndex], currentIndex);
+  } else {
+    pendingPause = false;
+    player?.play();
+  }
 }
 
 export async function handleStop(): Promise<void> {
+  downloadAbort?.abort();
+  cleanupTempFiles();
   if (player) {
     player.pause();
     player.setActiveForLockScreen(false);
-    player.replace(null);
     currentIndex = -1;
     queue = [];
   }
@@ -131,13 +230,16 @@ export async function handleStop(): Promise<void> {
 
 export async function handleSkipTo(index: number): Promise<void> {
   if (!player || index < 0 || index >= queue.length) return;
+
   const lastIndex = currentIndex;
   currentIndex = index;
-  playTrack(player, queue[currentIndex]);
-  notifyWebView?.({
-    type: 'trackChanged',
-    index: currentIndex,
-    lastIndex,
+
+  await downloadAndPlay(player, queue[currentIndex], currentIndex, () => {
+    notifyWebView?.({
+      type: 'trackChanged',
+      index: currentIndex,
+      lastIndex,
+    });
   });
 }
 
@@ -177,11 +279,18 @@ export function registerEventListeners(sendToWebView: SendToWebView) {
       const lastIndex = currentIndex;
       if (currentIndex < queue.length - 1) {
         currentIndex++;
-        playTrack(p, queue[currentIndex]);
-        notifyWebView?.({
-          type: 'trackChanged',
-          index: currentIndex,
-          lastIndex,
+        const track = queue[currentIndex];
+
+        downloadAndPlay(p, track, currentIndex, () => {
+          notifyWebView?.({
+            type: 'trackChanged',
+            index: currentIndex,
+            lastIndex,
+          });
+        }).catch(() => {
+          // Download failed — restore index and notify WebView so UI can recover
+          currentIndex = lastIndex;
+          notifyWebView?.({ type: 'playbackState', state: 'paused' });
         });
       } else {
         notifyWebView?.({
