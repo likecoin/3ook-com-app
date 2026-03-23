@@ -61,6 +61,11 @@ function getOrCreatePlayer(): AudioPlayer {
 }
 
 function playTrack(p: AudioPlayer, track: QueueTrack): void {
+  // Notify web view immediately so buffering UI shows without waiting
+  // for the first async playbackStatusUpdate callback.
+  lastSentState = 'buffering';
+  notifyWebView?.({ type: 'playbackState', state: 'buffering' });
+
   p.replace({ uri: track.uri, headers: track.headers });
   p.setPlaybackRate(currentRate);
   p.setActiveForLockScreen(true, {
@@ -168,11 +173,15 @@ export function registerEventListeners(sendToWebView: SendToWebView) {
   const p = getOrCreatePlayer();
 
   const sub = p.addListener('playbackStatusUpdate', (status) => {
-    // Map expo-audio status to RNTP-compatible state strings
+    // Detect playback errors (AVPlayer status = "failed")
+    if (status.playbackState === 'failed') {
+      notifyWebView?.({ type: 'error', message: 'Playback failed' });
+      return;
+    }
+
+    // Map expo-audio status to state strings
     let state: string;
-    if (!status.isLoaded) {
-      state = 'loading';
-    } else if (status.isBuffering) {
+    if (!status.isLoaded || status.isBuffering) {
       state = 'buffering';
     } else if (status.playing) {
       state = 'playing';
