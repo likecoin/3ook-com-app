@@ -66,6 +66,12 @@ function playTrack(p: AudioPlayer, track: QueueTrack): void {
   lastSentState = 'buffering';
   notifyWebView?.({ type: 'playbackState', state: 'buffering' });
 
+  // Pause before replace so that replaceCurrentSource sees wasPlaying=false
+  // and does NOT schedule its own onReady { play() }. Without this, both
+  // the internal auto-resume and our explicit play() below race, and
+  // addPlaybackEndNotification can register on the wrong AVPlayerItem —
+  // causing didJustFinish to never fire.
+  p.pause();
   p.replace({ uri: track.uri, headers: track.headers });
   p.setPlaybackRate(currentRate);
   p.setActiveForLockScreen(true, {
@@ -126,6 +132,7 @@ async function doLoad(msg: LoadMessage): Promise<void> {
   currentRate = msg.rate;
   lastFinishTime = 0;
 
+  notifyWebView?.({ type: 'trackChanged', index: currentIndex, lastIndex: -1 });
   playTrack(p, queue[currentIndex]);
 }
 
@@ -153,12 +160,12 @@ export function handleSkipTo(index: number): void {
 
   const lastIndex = currentIndex;
   currentIndex = index;
-  playTrack(player, queue[currentIndex]);
   notifyWebView?.({
     type: 'trackChanged',
     index: currentIndex,
     lastIndex,
   });
+  playTrack(player, queue[currentIndex]);
 }
 
 export function handleSetRate(rate: number): void {
@@ -196,27 +203,16 @@ export function registerEventListeners(sendToWebView: SendToWebView) {
       notifyWebView?.({ type: 'playbackState', state });
     }
 
-    // Auto-advance on track finish (debounce for Android duplicate events)
+    // Notify web app when a track finishes so it can control advancement
     if (status.didJustFinish) {
       const now = Date.now();
       if (now - lastFinishTime < 500) return;
       lastFinishTime = now;
 
-      const lastIndex = currentIndex;
-      if (currentIndex < queue.length - 1) {
-        currentIndex++;
-        playTrack(p, queue[currentIndex]);
-        notifyWebView?.({
-          type: 'trackChanged',
-          index: currentIndex,
-          lastIndex,
-        });
+      if (currentIndex >= queue.length - 1) {
+        notifyWebView?.({ type: 'queueEnded' });
       } else {
-        notifyWebView?.({
-          type: 'queueEnded',
-          track: lastIndex,
-          position: status.currentTime,
-        });
+        notifyWebView?.({ type: 'ended', index: currentIndex });
       }
     }
   });
