@@ -136,8 +136,10 @@ export function handleStop(): void {
   if (player) {
     player.pause();
     player.setActiveForLockScreen(false);
+    player.replace(null);
     currentIndex = -1;
     queue = [];
+    lastSentState = '';
   }
 }
 
@@ -165,6 +167,7 @@ export async function handleSeekTo(position: number): Promise<void> {
 
 export function registerEventListeners(sendToWebView: SendToWebView) {
   notifyWebView = sendToWebView;
+  lastSentState = '';
   const p = getOrCreatePlayer();
 
   const sub = p.addListener('playbackStatusUpdate', (status) => {
