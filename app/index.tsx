@@ -94,6 +94,7 @@ export default function App() {
           sharedCookiesEnabled={true}
           mediaPlaybackRequiresUserAction={false}
           allowsInlineMediaPlayback={true}
+          pullToRefreshEnabled={true}
           onMessage={handleMessage}
           onContentProcessDidTerminate={handleContentProcessDidTerminate}
           onError={(e) => console.warn('[WebView error]', e.nativeEvent)}
