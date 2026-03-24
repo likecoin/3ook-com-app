@@ -70,7 +70,6 @@
       "expo-image",
       "expo-web-browser",
       "expo-asset",
-      "@react-native-firebase/app",
       [
         "expo-build-properties",
         {
@@ -79,7 +78,9 @@
             "forceStaticLinking": ["RNFBApp", "RNFBAnalytics"]
           }
         }
-      ]
+      ],
+      "expo-localization",
+      "@react-native-firebase/app"
     ],
     "experiments": {
       "typedRoutes": true,
