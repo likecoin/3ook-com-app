@@ -11,10 +11,10 @@ export interface LoadMessage {
 
 export function setupPlayer(): Promise<void>;
 export function handleLoad(msg: LoadMessage): Promise<void>;
-export function handlePause(): Promise<void>;
-export function handleResume(): Promise<void>;
-export function handleStop(): Promise<void>;
-export function handleSkipTo(index: number): Promise<void>;
-export function handleSetRate(rate: number): Promise<void>;
+export function handlePause(): void;
+export function handleResume(): void;
+export function handleStop(): void;
+export function handleSkipTo(index: number): void;
+export function handleSetRate(rate: number): void;
 export function handleSeekTo(position: number): Promise<void>;
 export function registerEventListeners(sendToWebView: (data: object) => void): () => void;
