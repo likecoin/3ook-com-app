@@ -1,6 +1,7 @@
 {
   "expo": {
     "name": "3ook.com",
+    "owner": "likerland",
     "slug": "3ook-com-app",
     "version": "1.1.0",
     "orientation": "portrait",
