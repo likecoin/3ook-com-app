@@ -132,6 +132,7 @@ async function doLoad(msg: LoadMessage): Promise<void> {
   currentRate = msg.rate;
   lastFinishTime = 0;
 
+  notifyWebView?.({ type: 'trackChanged', index: currentIndex, lastIndex: -1 });
   playTrack(p, queue[currentIndex]);
 }
 
@@ -159,12 +160,12 @@ export function handleSkipTo(index: number): void {
 
   const lastIndex = currentIndex;
   currentIndex = index;
-  playTrack(player, queue[currentIndex]);
   notifyWebView?.({
     type: 'trackChanged',
     index: currentIndex,
     lastIndex,
   });
+  playTrack(player, queue[currentIndex]);
 }
 
 export function handleSetRate(rate: number): void {
