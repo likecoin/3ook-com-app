@@ -141,7 +141,6 @@ export function handleStop(): void {
   if (player) {
     player.pause();
     player.setActiveForLockScreen(false);
-    player.replace(null);
     currentIndex = -1;
     queue = [];
     lastSentState = '';
@@ -196,28 +195,13 @@ export function registerEventListeners(sendToWebView: SendToWebView) {
       notifyWebView?.({ type: 'playbackState', state });
     }
 
-    // Auto-advance on track finish (debounce for Android duplicate events)
+    // Notify web app when a track finishes so it can control advancement
     if (status.didJustFinish) {
       const now = Date.now();
       if (now - lastFinishTime < 500) return;
       lastFinishTime = now;
 
-      const lastIndex = currentIndex;
-      if (currentIndex < queue.length - 1) {
-        currentIndex++;
-        playTrack(p, queue[currentIndex]);
-        notifyWebView?.({
-          type: 'trackChanged',
-          index: currentIndex,
-          lastIndex,
-        });
-      } else {
-        notifyWebView?.({
-          type: 'queueEnded',
-          track: lastIndex,
-          position: status.currentTime,
-        });
-      }
+      notifyWebView?.({ type: 'ended', index: currentIndex });
     }
   });
 
