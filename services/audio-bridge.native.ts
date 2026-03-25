@@ -50,7 +50,9 @@ let lastSentState = '';
 
 // Auto-resume & stuck detection state
 const MAX_AUTO_RESUME_RETRIES = 3;
-const STUCK_TIMEOUT_MS = 5000;
+// Longer than web player's 5s because iOS uses blocking=1 URLs where the
+// server generates the full TTS audio before responding.
+const STUCK_TIMEOUT_MS = 15000;
 let active = false;
 let userPaused = false;
 let audible = false;
@@ -162,12 +164,9 @@ function armStuckTimer(): void {
     stuckRetried = true;
     const p = getActivePlayer();
     if (!p) return;
-    const track = queue[currentIndex];
-    if (!track) return;
-    // Pause before replace to avoid the same wasPlaying race as playTrack()
-    p.pause();
-    p.replace({ uri: track.uri, headers: track.headers });
-    activatePlayer(p, track);
+    // Non-disruptive retry: just call play() instead of replace(),
+    // so we don't nuke a nearly-ready buffer on slow connections.
+    p.play();
     stuckTimer = setTimeout(() => {
       stuckTimer = null;
       if (audible || !active || errored) return;
@@ -315,8 +314,9 @@ export function handleResume(): void {
   userPaused = false;
   errored = false;
   stuckRetried = false;
+  // No armStuckTimer() — on resume the source is already buffered.
+  // OS-interruption stalls are handled by the auto-resume retry loop.
   getActivePlayer()?.play();
-  armStuckTimer();
 }
 
 export function handleStop(): void {
@@ -342,6 +342,7 @@ export function handleSkipTo(index: number): void {
   if (!player || index < 0 || index >= queue.length) return;
   active = true;
   userPaused = false;
+  lastFinishTime = 0;
 
   const lastIndex = currentIndex;
   currentIndex = index;
@@ -421,7 +422,8 @@ export function registerEventListeners(sendToWebView: SendToWebView) {
         autoResumeRetries += 1;
         autoResumeTimer = setTimeout(() => {
           autoResumeTimer = null;
-          if (active && !audible) {
+          if (active && !audible && !userPaused && !errored) {
+            audible = true; // re-arm so next paused status can trigger another retry
             getActivePlayer()?.play();
           }
         }, 1000);
@@ -435,6 +437,7 @@ export function registerEventListeners(sendToWebView: SendToWebView) {
 
     // Notify web app when a track finishes so it can control advancement
     if (status.didJustFinish) {
+      audible = false;
       const now = Date.now();
       if (now - lastFinishTime < 500) return;
       lastFinishTime = now;
