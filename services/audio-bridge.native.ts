@@ -48,6 +48,18 @@ let loadPromise: Promise<void> = Promise.resolve();
 let notifyWebView: SendToWebView | null = null;
 let lastSentState = '';
 
+// Auto-resume & stuck detection state
+const MAX_AUTO_RESUME_RETRIES = 3;
+const STUCK_TIMEOUT_MS = 5000;
+let active = false;
+let userPaused = false;
+let audible = false;
+let autoResumeRetries = 0;
+let autoResumeTimer: ReturnType<typeof setTimeout> | null = null;
+let stuckTimer: ReturnType<typeof setTimeout> | null = null;
+let stuckRetried = false;
+let errored = false;
+
 // TODO: Remove this once the blocking param is no longer used in the web app.
 // This is to support streaming without breaking older versions of the app.
 function stripBlockingParam(url: string): string {
@@ -128,6 +140,44 @@ function getOrCreatePlayers(): AudioPlayer {
   return getActivePlayer()!;
 }
 
+function clearAutoResumeTimer(): void {
+  if (autoResumeTimer) {
+    clearTimeout(autoResumeTimer);
+    autoResumeTimer = null;
+  }
+}
+
+function clearStuckTimer(): void {
+  if (stuckTimer) {
+    clearTimeout(stuckTimer);
+    stuckTimer = null;
+  }
+}
+
+function armStuckTimer(): void {
+  clearStuckTimer();
+  stuckTimer = setTimeout(() => {
+    if (audible || !active || stuckRetried || errored) return;
+    console.warn('Audio stuck — retrying playback');
+    stuckRetried = true;
+    const p = getActivePlayer();
+    if (!p) return;
+    const track = queue[currentIndex];
+    if (!track) return;
+    // Pause before replace to avoid the same wasPlaying race as playTrack()
+    p.pause();
+    p.replace({ uri: track.uri, headers: track.headers });
+    activatePlayer(p, track);
+    stuckTimer = setTimeout(() => {
+      stuckTimer = null;
+      if (audible || !active || errored) return;
+      console.warn('Audio stuck — retry failed');
+      errored = true;
+      notifyWebView?.({ type: 'error', message: 'Playback stuck' });
+    }, STUCK_TIMEOUT_MS);
+  }, STUCK_TIMEOUT_MS);
+}
+
 function activatePlayer(p: AudioPlayer, track: QueueTrack): void {
   p.setPlaybackRate(currentRate);
   p.setActiveForLockScreen(true, {
@@ -139,6 +189,12 @@ function activatePlayer(p: AudioPlayer, track: QueueTrack): void {
 }
 
 function playTrack(p: AudioPlayer, track: QueueTrack): void {
+  audible = false;
+  errored = false;
+  stuckRetried = false;
+  autoResumeRetries = 0;
+  clearAutoResumeTimer();
+
   lastSentState = 'buffering';
   notifyWebView?.({ type: 'playbackState', state: 'buffering' });
 
@@ -150,15 +206,23 @@ function playTrack(p: AudioPlayer, track: QueueTrack): void {
   p.pause();
   p.replace({ uri: track.uri, headers: track.headers });
   activatePlayer(p, track);
+  armStuckTimer();
 }
 
 function swapToIdle(track: QueueTrack): void {
+  audible = false;
+  errored = false;
+  stuckRetried = false;
+  autoResumeRetries = 0;
+  clearAutoResumeTimer();
+
   const oldActive = getActivePlayer();
   // Pause old player first to prevent brief audio overlap during swap
   oldActive?.pause();
 
   swapSlots();
   activatePlayer(getActivePlayer()!, track);
+  armStuckTimer();
 
   // Deactivate old player after new one is active (avoids lock screen gap).
   // We intentionally skip replace(null) — iOS expo-audio throws
@@ -220,6 +284,12 @@ async function doLoad(msg: LoadMessage): Promise<void> {
   currentIndex = msg.startIndex;
   currentRate = msg.rate;
   lastFinishTime = 0;
+  active = true;
+  userPaused = false;
+  audible = false;
+  autoResumeRetries = 0;
+  clearAutoResumeTimer();
+  clearStuckTimer();
   resetIdle();
 
   // Idle player may still be buffering its last preload; pause before new queue
@@ -230,14 +300,31 @@ async function doLoad(msg: LoadMessage): Promise<void> {
 }
 
 export function handlePause(): void {
+  active = false;
+  userPaused = true;
+  audible = false;
+  clearAutoResumeTimer();
+  clearStuckTimer();
   getActivePlayer()?.pause();
 }
 
 export function handleResume(): void {
+  clearAutoResumeTimer();
+  autoResumeRetries = 0;
+  active = true;
+  userPaused = false;
+  errored = false;
+  stuckRetried = false;
   getActivePlayer()?.play();
+  armStuckTimer();
 }
 
 export function handleStop(): void {
+  active = false;
+  userPaused = false;
+  audible = false;
+  clearAutoResumeTimer();
+  clearStuckTimer();
   // Skip replace(null) — iOS expo-audio cannot cast null to AudioSource.
   // Pause is enough; players are reused with replace(source) on next load.
   getActivePlayer()?.pause();
@@ -251,8 +338,10 @@ export function handleStop(): void {
 }
 
 export function handleSkipTo(index: number): void {
-  const active = getActivePlayer();
-  if (!active || index < 0 || index >= queue.length) return;
+  const player = getActivePlayer();
+  if (!player || index < 0 || index >= queue.length) return;
+  active = true;
+  userPaused = false;
 
   const lastIndex = currentIndex;
   currentIndex = index;
@@ -261,7 +350,7 @@ export function handleSkipTo(index: number): void {
     swapToIdle(queue[currentIndex]);
   } else {
     resetIdle();
-    playTrack(active, queue[currentIndex]);
+    playTrack(player, queue[currentIndex]);
   }
 
   notifyWebView?.({
@@ -293,6 +382,9 @@ export function registerEventListeners(sendToWebView: SendToWebView) {
 
     // Detect playback errors (AVPlayer status = "failed")
     if (status.playbackState === 'failed') {
+      errored = true;
+      clearStuckTimer();
+      clearAutoResumeTimer();
       notifyWebView?.({ type: 'error', message: 'Playback failed' });
       return;
     }
@@ -309,6 +401,31 @@ export function registerEventListeners(sendToWebView: SendToWebView) {
     if (state !== lastSentState) {
       lastSentState = state;
       notifyWebView?.({ type: 'playbackState', state });
+    }
+
+    // Audio reached playing state — clear stuck timer, reset resume retries
+    if (state === 'playing') {
+      audible = true;
+      errored = false;
+      autoResumeRetries = 0;
+      clearStuckTimer();
+    }
+
+    // Detect unexpected pause (OS interruption: phone call, Siri, other app).
+    // The `audible` guard ensures this only fires on the playing→paused transition,
+    // not on every subsequent paused status tick.
+    if (state === 'paused' && audible && !userPaused && active && !errored
+        && !autoResumeTimer && !status.didJustFinish) {
+      audible = false;
+      if (autoResumeRetries < MAX_AUTO_RESUME_RETRIES) {
+        autoResumeRetries += 1;
+        autoResumeTimer = setTimeout(() => {
+          autoResumeTimer = null;
+          if (active && !audible) {
+            getActivePlayer()?.play();
+          }
+        }, 1000);
+      }
     }
 
     // Trigger preload once playback starts
@@ -336,7 +453,12 @@ export function registerEventListeners(sendToWebView: SendToWebView) {
   return () => {
     subA.remove();
     subB.remove();
+    clearAutoResumeTimer();
+    clearStuckTimer();
     resetIdle();
+    active = false;
+    userPaused = false;
+    audible = false;
     notifyWebView = null;
   };
 }
