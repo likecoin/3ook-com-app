@@ -156,6 +156,14 @@ function clearStuckTimer(): void {
   }
 }
 
+function resetRecoveryState(): void {
+  audible = false;
+  errored = false;
+  stuckRetried = false;
+  autoResumeRetries = 0;
+  clearAutoResumeTimer();
+}
+
 function armStuckTimer(): void {
   clearStuckTimer();
   stuckTimer = setTimeout(() => {
@@ -188,11 +196,7 @@ function activatePlayer(p: AudioPlayer, track: QueueTrack): void {
 }
 
 function playTrack(p: AudioPlayer, track: QueueTrack): void {
-  audible = false;
-  errored = false;
-  stuckRetried = false;
-  autoResumeRetries = 0;
-  clearAutoResumeTimer();
+  resetRecoveryState();
 
   lastSentState = 'buffering';
   notifyWebView?.({ type: 'playbackState', state: 'buffering' });
@@ -209,11 +213,7 @@ function playTrack(p: AudioPlayer, track: QueueTrack): void {
 }
 
 function swapToIdle(track: QueueTrack): void {
-  audible = false;
-  errored = false;
-  stuckRetried = false;
-  autoResumeRetries = 0;
-  clearAutoResumeTimer();
+  resetRecoveryState();
 
   const oldActive = getActivePlayer();
   // Pause old player first to prevent brief audio overlap during swap
@@ -285,9 +285,6 @@ async function doLoad(msg: LoadMessage): Promise<void> {
   lastFinishTime = 0;
   active = true;
   userPaused = false;
-  audible = false;
-  autoResumeRetries = 0;
-  clearAutoResumeTimer();
   clearStuckTimer();
   resetIdle();
 
@@ -322,8 +319,7 @@ export function handleResume(): void {
 export function handleStop(): void {
   active = false;
   userPaused = false;
-  audible = false;
-  clearAutoResumeTimer();
+  resetRecoveryState();
   clearStuckTimer();
   // Skip replace(null) — iOS expo-audio cannot cast null to AudioSource.
   // Pause is enough; players are reused with replace(source) on next load.
@@ -456,12 +452,11 @@ export function registerEventListeners(sendToWebView: SendToWebView) {
   return () => {
     subA.remove();
     subB.remove();
-    clearAutoResumeTimer();
     clearStuckTimer();
     resetIdle();
     active = false;
     userPaused = false;
-    audible = false;
+    resetRecoveryState();
     notifyWebView = null;
   };
 }
