@@ -11,7 +11,7 @@ import {
   registerEventListeners,
 } from '../services/audio-bridge';
 import { getIdentityHandlers } from '../services/identity-bridge';
-import { getURLHandlers } from '../services/url-bridge';
+import { getURLHandlers, isDeepLink, openDeepLink } from '../services/url-bridge';
 import { posthog } from '../services/posthog';
 
 export default function App() {
@@ -41,6 +41,19 @@ export default function App() {
     webViewRef.current?.reload();
   }, []);
 
+  // Intercept wallet deep links (wc:, metamask:, etc.) that JS SDKs
+  // trigger via navigation rather than postMessage.
+  const handleNavigationRequest = useCallback(
+    (request: { url: string }) => {
+      if (isDeepLink(request.url)) {
+        openDeepLink(request.url).catch((e) => console.warn('[deep link]', e));
+        return false;
+      }
+      return true;
+    },
+    []
+  );
+
   const handleMessage = useCallback(
     async (event: WebViewMessageEvent) => {
       try {
@@ -66,6 +79,7 @@ export default function App() {
           mediaPlaybackRequiresUserAction={false}
           allowsInlineMediaPlayback={true}
           pullToRefreshEnabled={true}
+          onShouldStartLoadWithRequest={handleNavigationRequest}
           onMessage={handleMessage}
           onContentProcessDidTerminate={handleContentProcessDidTerminate}
           onError={(e) => console.warn('[WebView error]', e.nativeEvent)}
