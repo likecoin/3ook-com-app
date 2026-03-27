@@ -4,30 +4,33 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import WebView, { type WebViewMessageEvent } from 'react-native-webview';
 
 import packageJson from '../package.json';
+import { registerHandlers, dispatch } from '../services/bridge-dispatcher';
 import {
   setupPlayer,
-  handleLoad,
-  handlePause,
-  handleResume,
-  handleStop,
-  handleSkipTo,
-  handleSetRate,
-  handleSeekTo,
+  getAudioHandlers,
   registerEventListeners,
-  type LoadMessage,
 } from '../services/audio-bridge';
+import { getIdentityHandlers } from '../services/identity-bridge';
+import { getURLHandlers } from '../services/url-bridge';
+import { posthog } from '../services/posthog';
 
 export default function App() {
   const insets = useSafeAreaInsets();
   const webViewRef = useRef<WebView>(null);
 
   const sendToWebView = useCallback((data: object) => {
+    const json = JSON.stringify(data);
     webViewRef.current?.injectJavaScript(
-      `window.dispatchEvent(new CustomEvent('nativeAudioEvent',{detail:${JSON.stringify(data)}}));true;`
+      `window.dispatchEvent(new CustomEvent('nativeAudioEvent',{detail:${json}}));` +
+        `window.dispatchEvent(new CustomEvent('nativeBridgeEvent',{detail:${json}}));true;`
     );
   }, []);
 
   useEffect(() => {
+    registerHandlers(getAudioHandlers());
+    registerHandlers(getIdentityHandlers(posthog));
+    registerHandlers(getURLHandlers());
+
     setupPlayer();
     const unsubscribe = registerEventListeners(sendToWebView);
     return unsubscribe;
@@ -41,44 +44,12 @@ export default function App() {
   const handleMessage = useCallback(
     async (event: WebViewMessageEvent) => {
       try {
-        const msg: { type: string; [key: string]: unknown } = JSON.parse(
-          event.nativeEvent.data
-        );
-
-        switch (msg.type) {
-          case 'load':
-            await handleLoad(msg as unknown as LoadMessage);
-            break;
-          case 'pause':
-            await handlePause();
-            break;
-          case 'resume':
-            await handleResume();
-            break;
-          case 'stop':
-            await handleStop();
-            break;
-          case 'skipTo':
-            if (typeof msg.index === 'number') {
-              await handleSkipTo(msg.index);
-            }
-            break;
-          case 'setRate':
-            if (typeof msg.rate === 'number') {
-              await handleSetRate(msg.rate);
-            }
-            break;
-          case 'seekTo':
-            if (typeof msg.position === 'number') {
-              await handleSeekTo(msg.position);
-            }
-            break;
-        }
+        await dispatch(event.nativeEvent.data, sendToWebView);
       } catch (e) {
         console.warn('[onMessage]', e);
       }
     },
-    []
+    [sendToWebView]
   );
 
   return (

@@ -17,6 +17,11 @@ export function handleStop(): void {}
 export function handleSkipTo(_index: number): void {}
 export function handleSetRate(_rate: number): void {}
 export async function handleSeekTo(_position: number): Promise<void> {}
+import type { BridgeHandlerMap } from './bridge-dispatcher';
+
+export function getAudioHandlers(): BridgeHandlerMap {
+  return {};
+}
 export function registerEventListeners(_sendToWebView: (data: object) => void) {
   return () => {};
 }

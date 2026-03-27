@@ -7,7 +7,7 @@ import {
 } from 'expo-audio';
 import { Platform } from 'react-native';
 
-type SendToWebView = (data: object) => void;
+import type { SendToWebView, BridgeHandlerMap } from './bridge-dispatcher';
 
 interface TrackInfo {
   index: number;
@@ -366,6 +366,24 @@ export function handleSetRate(rate: number): void {
 
 export async function handleSeekTo(position: number): Promise<void> {
   await getActivePlayer()?.seekTo(position);
+}
+
+export function getAudioHandlers(): BridgeHandlerMap {
+  return {
+    load: (msg) => handleLoad(msg as unknown as LoadMessage),
+    pause: () => handlePause(),
+    resume: () => handleResume(),
+    stop: () => handleStop(),
+    skipTo: (msg) => {
+      if (typeof msg.index === 'number') handleSkipTo(msg.index);
+    },
+    setRate: (msg) => {
+      if (typeof msg.rate === 'number') handleSetRate(msg.rate);
+    },
+    seekTo: (msg) => {
+      if (typeof msg.position === 'number') handleSeekTo(msg.position);
+    },
+  };
 }
 
 export function registerEventListeners(sendToWebView: SendToWebView) {
