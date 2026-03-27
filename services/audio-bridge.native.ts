@@ -49,7 +49,7 @@ let notifyWebView: SendToWebView | null = null;
 let lastSentState = '';
 
 // Auto-resume & stuck detection state
-const MAX_AUTO_RESUME_RETRIES = 3;
+const MAX_AUTO_RESUME_RETRIES = 60;
 // Longer than web player's 5s because iOS uses blocking=1 URLs where the
 // server generates the full TTS audio before responding.
 const STUCK_TIMEOUT_MS = 15000;
@@ -422,7 +422,7 @@ export function registerEventListeners(sendToWebView: SendToWebView) {
             audible = true; // re-arm so next paused status can trigger another retry
             getActivePlayer()?.play();
           }
-        }, 1000);
+        }, 2000);
       }
     }
 
