@@ -1,5 +1,5 @@
 import { useEffect, useRef, useCallback } from 'react';
-import { StyleSheet, View } from 'react-native';
+import { Platform, StyleSheet, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import WebView, { type WebViewMessageEvent } from 'react-native-webview';
 
@@ -90,7 +90,7 @@ export default function App() {
           source={{ uri: 'https://3ook.com?app=1' }}
           originWhitelist={['*']}
           style={styles.webview}
-          userAgent={`3ook-com-app/${packageJson.version}`}
+          userAgent={`3ook-com-app/${packageJson.version} (${Platform.OS} ${Platform.Version})`}
           sharedCookiesEnabled={true}
           mediaPlaybackRequiresUserAction={false}
           allowsInlineMediaPlayback={true}
