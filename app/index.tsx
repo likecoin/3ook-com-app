@@ -18,13 +18,13 @@ import {
   type LoadMessage,
 } from '../services/audio-bridge';
 
-// e.g. 3ook-com-app/1.1.0 (iOS; 18.0) Build/42
+// e.g. 3ook-com-app/1.1.0 (iOS 18.0) Build/42
 const USER_AGENT = (() => {
   const appVersion = Application.nativeApplicationVersion ?? packageJson.version;
   const buildNumber = Application.nativeBuildVersion;
   const buildToken = buildNumber ? ` Build/${buildNumber}` : '';
   const osName = Platform.OS === 'ios' ? 'iOS' : 'Android';
-  return `3ook-com-app/${appVersion} (${osName}; ${Platform.Version})${buildToken}`;
+  return `3ook-com-app/${appVersion} (${osName} ${Platform.Version})${buildToken}`;
 })();
 
 export default function App() {
