@@ -2,6 +2,7 @@ import { useEffect, useRef, useCallback } from 'react';
 import { Platform, StyleSheet, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import WebView, { type WebViewMessageEvent } from 'react-native-webview';
+import * as Application from 'expo-application';
 
 import packageJson from '../package.json';
 import {
@@ -16,6 +17,15 @@ import {
   registerEventListeners,
   type LoadMessage,
 } from '../services/audio-bridge';
+
+// e.g. 3ook-com-app/1.1.0 (iOS 18.0) Build/42
+const USER_AGENT = (() => {
+  const appVersion = Application.nativeApplicationVersion ?? packageJson.version;
+  const buildNumber = Application.nativeBuildVersion;
+  const buildToken = buildNumber ? ` Build/${buildNumber}` : '';
+  const osName = Platform.OS === 'ios' ? 'iOS' : 'Android';
+  return `3ook-com-app/${appVersion} (${osName} ${Platform.Version})${buildToken}`;
+})();
 
 export default function App() {
   const insets = useSafeAreaInsets();
@@ -90,7 +100,7 @@ export default function App() {
           source={{ uri: 'https://3ook.com?app=1' }}
           originWhitelist={['*']}
           style={styles.webview}
-          userAgent={`3ook-com-app/${packageJson.version} (${Platform.OS} ${Platform.Version})`}
+          userAgent={USER_AGENT}
           sharedCookiesEnabled={true}
           mediaPlaybackRequiresUserAction={false}
           allowsInlineMediaPlayback={true}
