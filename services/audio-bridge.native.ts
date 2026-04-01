@@ -333,12 +333,12 @@ export function handleStop(): void {
   lastSentState = '';
 }
 
-export function handleSkipTo(index: number): void {
+export function handleSkipTo(index: number, { resetFinishGuard = true } = {}): void {
   const player = getActivePlayer();
   if (!player || index < 0 || index >= queue.length) return;
   active = true;
   userPaused = false;
-  lastFinishTime = 0;
+  if (resetFinishGuard) lastFinishTime = 0;
 
   const lastIndex = currentIndex;
   currentIndex = index;
@@ -444,7 +444,7 @@ export function registerEventListeners(sendToWebView: SendToWebView) {
         // Auto-advance natively on Android because the WebView JS execution
         // is suspended when the screen is locked, so it cannot respond to
         // an 'ended' event with a 'skipTo' message.
-        handleSkipTo(currentIndex + 1);
+        handleSkipTo(currentIndex + 1, { resetFinishGuard: false });
       } else {
         notifyWebView?.({ type: 'ended', index: currentIndex });
       }
@@ -460,12 +460,10 @@ export function registerEventListeners(sendToWebView: SendToWebView) {
   const appStateSub = Platform.OS === 'android'
     ? AppState.addEventListener('change', (nextAppState) => {
         if (nextAppState === 'active' && currentIndex >= 0) {
-          const p = getActivePlayer();
-          const currentState = p && (!p.isLoaded || p.isBuffering)
-            ? 'buffering'
-            : p?.playing ? 'playing' : 'paused';
           notifyWebView?.({ type: 'trackChanged', index: currentIndex, lastIndex: -1 });
-          notifyWebView?.({ type: 'playbackState', state: currentState });
+          if (lastSentState) {
+            notifyWebView?.({ type: 'playbackState', state: lastSentState });
+          }
         }
       })
     : null;
