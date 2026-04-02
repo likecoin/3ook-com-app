@@ -1,0 +1,44 @@
+diff --git a/node_modules/expo-audio/android/src/main/java/expo/modules/audio/AudioModule.kt b/node_modules/expo-audio/android/src/main/java/expo/modules/audio/AudioModule.kt
+index 72a6e9e..3629367 100644
+--- a/node_modules/expo-audio/android/src/main/java/expo/modules/audio/AudioModule.kt
++++ b/node_modules/expo-audio/android/src/main/java/expo/modules/audio/AudioModule.kt
+@@ -127,11 +127,11 @@ class AudioModule : Module() {
+     val result = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+       val requestType = interruptionMode?.let {
+         if (it == InterruptionMode.DO_NOT_MIX) {
+-          AudioManager.AUDIOFOCUS_GAIN_TRANSIENT
++          AudioManager.AUDIOFOCUS_GAIN
+         } else {
+           AudioManager.AUDIOFOCUS_GAIN_TRANSIENT_MAY_DUCK
+         }
+-      } ?: AudioManager.AUDIOFOCUS_GAIN_TRANSIENT
++      } ?: AudioManager.AUDIOFOCUS_GAIN
+       audioFocusRequest = AudioFocusRequest.Builder(requestType).run {
+         setAudioAttributes(
+           AudioAttributes.Builder()
+@@ -148,7 +148,7 @@ class AudioModule : Module() {
+     } else {
+       @Suppress("DEPRECATION")
+       val requestType = if (interruptionMode == InterruptionMode.DO_NOT_MIX) {
+-        AudioManager.AUDIOFOCUS_GAIN_TRANSIENT
++        AudioManager.AUDIOFOCUS_GAIN
+       } else {
+         AudioManager.AUDIOFOCUS_GAIN_TRANSIENT_MAY_DUCK
+       }
+diff --git a/node_modules/expo-audio/android/src/main/java/expo/modules/audio/service/BaseServiceConnection.kt b/node_modules/expo-audio/android/src/main/java/expo/modules/audio/service/BaseServiceConnection.kt
+index d3802fb..d2a054d 100644
+--- a/node_modules/expo-audio/android/src/main/java/expo/modules/audio/service/BaseServiceConnection.kt
++++ b/node_modules/expo-audio/android/src/main/java/expo/modules/audio/service/BaseServiceConnection.kt
+@@ -125,7 +125,11 @@ abstract class BaseServiceConnection<T>(appContext: AppContext) : ServiceConnect
+         val intent = Intent(context, clazz)
+         intent.action = action
+ 
+-        startService(intent)
++        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
++          startForegroundService(intent)
++        } else {
++          startService(intent)
++        }
+ 
+         val flags = if (Build.VERSION.SDK_INT >= 29) {
+           BIND_AUTO_CREATE or BIND_INCLUDE_CAPABILITIES

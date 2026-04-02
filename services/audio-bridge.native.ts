@@ -5,7 +5,7 @@ import {
   type AudioPlayer,
   type AudioStatus,
 } from 'expo-audio';
-import { Platform } from 'react-native';
+import { AppState, Platform } from 'react-native';
 
 type SendToWebView = (data: object) => void;
 
@@ -333,12 +333,12 @@ export function handleStop(): void {
   lastSentState = '';
 }
 
-export function handleSkipTo(index: number): void {
+export function handleSkipTo(index: number, { resetFinishGuard = true } = {}): void {
   const player = getActivePlayer();
   if (!player || index < 0 || index >= queue.length) return;
   active = true;
   userPaused = false;
-  lastFinishTime = 0;
+  if (resetFinishGuard) lastFinishTime = 0;
 
   const lastIndex = currentIndex;
   currentIndex = index;
@@ -431,7 +431,7 @@ export function registerEventListeners(sendToWebView: SendToWebView) {
       preloadNext();
     }
 
-    // Notify web app when a track finishes so it can control advancement
+    // Handle track finish
     if (status.didJustFinish) {
       audible = false;
       const now = Date.now();
@@ -440,6 +440,11 @@ export function registerEventListeners(sendToWebView: SendToWebView) {
 
       if (currentIndex >= queue.length - 1) {
         notifyWebView?.({ type: 'queueEnded' });
+      } else if (Platform.OS === 'android') {
+        // Auto-advance natively on Android because the WebView JS execution
+        // is suspended when the screen is locked, so it cannot respond to
+        // an 'ended' event with a 'skipTo' message.
+        handleSkipTo(currentIndex + 1, { resetFinishGuard: false });
       } else {
         notifyWebView?.({ type: 'ended', index: currentIndex });
       }
@@ -449,9 +454,24 @@ export function registerEventListeners(sendToWebView: SendToWebView) {
   const subA = playerA!.addListener('playbackStatusUpdate', (status) => onStatus(playerA!, status));
   const subB = playerB!.addListener('playbackStatusUpdate', (status) => onStatus(playerB!, status));
 
+  // On Android, re-sync the WebView when the app returns to the foreground.
+  // injectJavaScript calls made while the WebView was suspended are dropped,
+  // so the web app may have stale track/state info after lock screen playback.
+  const appStateSub = Platform.OS === 'android'
+    ? AppState.addEventListener('change', (nextAppState) => {
+        if (nextAppState === 'active' && currentIndex >= 0) {
+          notifyWebView?.({ type: 'trackChanged', index: currentIndex, lastIndex: -1 });
+          if (lastSentState) {
+            notifyWebView?.({ type: 'playbackState', state: lastSentState });
+          }
+        }
+      })
+    : null;
+
   return () => {
     subA.remove();
     subB.remove();
+    appStateSub?.remove();
     clearStuckTimer();
     resetIdle();
     active = false;
