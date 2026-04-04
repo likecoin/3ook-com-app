@@ -6,6 +6,7 @@ import {
   type AudioStatus,
 } from 'expo-audio';
 import { AppState, Platform } from 'react-native';
+import { requestBatteryOptimizationExemption } from '../modules/battery-optimization';
 
 import type { SendToWebView, BridgeHandlerMap } from './bridge-dispatcher';
 
@@ -238,6 +239,9 @@ export function handleLoad(msg: LoadMessage): Promise<void> {
 
 async function doLoad(msg: LoadMessage): Promise<void> {
   await setupPlayer();
+
+  requestBatteryOptimizationExemption();
+
   const p = getOrCreatePlayers();
 
   const cookieUrl = msg.tracks[0]?.url;
