@@ -1,23 +1,19 @@
-import { useEffect, useRef, useCallback } from 'react';
+import * as Application from 'expo-application';
+import { useCallback, useEffect, useRef } from 'react';
 import { Platform, StyleSheet, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import WebView, { type WebViewMessageEvent } from 'react-native-webview';
 import type { ShouldStartLoadRequest } from 'react-native-webview/lib/WebViewTypes';
-import * as Application from 'expo-application';
 
 import packageJson from '../package.json';
 import {
-  setupPlayer,
-  handleLoad,
-  handlePause,
-  handleResume,
-  handleStop,
-  handleSkipTo,
-  handleSetRate,
-  handleSeekTo,
+  getAudioHandlers,
   registerEventListeners,
-  type LoadMessage,
+  setupPlayer,
 } from '../services/audio-bridge';
+import { clearHandlers, dispatch, registerHandlers } from '../services/bridge-dispatcher';
+import { getIdentityHandlers } from '../services/identity-bridge';
+import { posthog } from '../services/posthog';
 import { isDeepLink, openDeepLink } from '../services/url-bridge';
 
 // e.g. 3ook-com-app/1.1.0 (iOS 18.0) Build/42
@@ -34,15 +30,23 @@ export default function App() {
   const webViewRef = useRef<WebView>(null);
 
   const sendToWebView = useCallback((data: object) => {
+    const json = JSON.stringify(data);
     webViewRef.current?.injectJavaScript(
-      `window.dispatchEvent(new CustomEvent('nativeAudioEvent',{detail:${JSON.stringify(data)}}));true;`
+      `window.dispatchEvent(new CustomEvent('nativeAudioEvent',{detail:${json}}));` +
+        `window.dispatchEvent(new CustomEvent('nativeBridgeEvent',{detail:${json}}));true;`
     );
   }, []);
 
   useEffect(() => {
+    registerHandlers(getAudioHandlers());
+    registerHandlers(getIdentityHandlers(posthog));
+
     setupPlayer();
     const unsubscribe = registerEventListeners(sendToWebView);
-    return unsubscribe;
+    return () => {
+      unsubscribe();
+      clearHandlers();
+    };
   }, [sendToWebView]);
 
   // Reload WebView when iOS kills its content process in the background.
@@ -68,39 +72,7 @@ export default function App() {
   const handleMessage = useCallback(
     async (event: WebViewMessageEvent) => {
       try {
-        const msg: { type: string; [key: string]: unknown } = JSON.parse(
-          event.nativeEvent.data
-        );
-
-        switch (msg.type) {
-          case 'load':
-            await handleLoad(msg as unknown as LoadMessage);
-            break;
-          case 'pause':
-            await handlePause();
-            break;
-          case 'resume':
-            await handleResume();
-            break;
-          case 'stop':
-            await handleStop();
-            break;
-          case 'skipTo':
-            if (typeof msg.index === 'number') {
-              await handleSkipTo(msg.index);
-            }
-            break;
-          case 'setRate':
-            if (typeof msg.rate === 'number') {
-              await handleSetRate(msg.rate);
-            }
-            break;
-          case 'seekTo':
-            if (typeof msg.position === 'number') {
-              await handleSeekTo(msg.position);
-            }
-            break;
-        }
+        await dispatch(event.nativeEvent.data);
       } catch (e) {
         console.warn('[onMessage]', e);
       }
