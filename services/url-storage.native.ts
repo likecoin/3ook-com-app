@@ -53,10 +53,11 @@ export function saveLastUrl(url: string): void {
 export async function getInitialUrl(): Promise<string> {
   const fallback = `${BASE_URL}?app=1`;
   try {
-    if (!storageFile.exists) return fallback;
     const raw = await storageFile.text();
     const data: StoredUrl = JSON.parse(raw);
-    if (Date.now() - data.timestamp > MAX_AGE_MS) return fallback;
+    const now = Date.now();
+    if (!Number.isFinite(data.timestamp) || data.timestamp > now) return fallback;
+    if (now - data.timestamp > MAX_AGE_MS) return fallback;
     if (!is3ookUrl(data.url)) return fallback;
     return ensureAppParam(data.url);
   } catch {
