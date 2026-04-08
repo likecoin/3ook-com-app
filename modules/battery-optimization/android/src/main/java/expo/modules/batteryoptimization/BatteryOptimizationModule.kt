@@ -24,7 +24,11 @@ class BatteryOptimizationModule : Module() {
         data = Uri.parse("package:${context.packageName}")
         addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
       }
-      context.startActivity(intent)
+      // Some OEM ROMs strip this Settings activity or block the request;
+      // swallow failures so a missing system dialog doesn't crash the bridge.
+      try {
+        context.startActivity(intent)
+      } catch (_: Exception) {}
     }
   }
 }

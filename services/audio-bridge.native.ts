@@ -240,8 +240,6 @@ export function handleLoad(msg: LoadMessage): Promise<void> {
 async function doLoad(msg: LoadMessage): Promise<void> {
   await setupPlayer();
 
-  requestBatteryOptimizationExemption();
-
   const p = getOrCreatePlayers();
 
   const cookieUrl = msg.tracks[0]?.url;
@@ -259,6 +257,8 @@ async function doLoad(msg: LoadMessage): Promise<void> {
   const headers = cookieHeader ? { Cookie: cookieHeader } : undefined;
 
   if (!msg.tracks.length || msg.startIndex < 0 || msg.startIndex >= msg.tracks.length) return;
+
+  requestBatteryOptimizationExemption();
 
   queue = msg.tracks.map((t) => ({
     uri: Platform.OS === 'android' ? stripBlockingParam(t.url) : t.url,
