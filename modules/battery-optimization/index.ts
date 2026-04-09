@@ -13,7 +13,7 @@ const NativeModule =
 // Guard against re-prompting users who declined the system dialog —
 // isExempt() stays false in that case, so without this every call would
 // re-trigger the prompt.
-let requested = false;
+let hasRequested = false;
 
 /**
  * Shows the system dialog asking the user to exempt the app from battery
@@ -21,8 +21,8 @@ let requested = false;
  * or not on Android.
  */
 export function requestBatteryOptimizationExemption(): void {
-  if (requested) return;
-  requested = true;
+  if (hasRequested) return;
+  hasRequested = true;
   if (NativeModule && !NativeModule.isExempt()) {
     NativeModule.requestExemption();
   }
