@@ -6,6 +6,7 @@ import {
   type AudioStatus,
 } from 'expo-audio';
 import { AppState, Platform } from 'react-native';
+import { requestBatteryOptimizationExemption } from '../modules/battery-optimization';
 
 import type { SendToWebView, BridgeHandlerMap } from './bridge-dispatcher';
 
@@ -210,13 +211,10 @@ function swapToIdle(track: QueueTrack): void {
   activatePlayer(getActivePlayer()!, track);
   armStuckTimer();
 
-  // Deactivate old player after new one is active (avoids lock screen gap).
-  // We intentionally skip replace(null) — iOS expo-audio throws
-  // ConvertingException when casting null to AudioSource. Pause is sufficient
-  // since the player will get a new source via replace() on next preload.
-  if (oldActive) {
-    oldActive.setActiveForLockScreen(false);
-  }
+  // Do NOT call oldActive.setActiveForLockScreen(false) here.
+  // Explicitly deactivating the old player stops the foreground service on
+  // Android (OS may kill the process) and clears Now Playing on iOS before
+  // the new player's lock screen info is fully established.
 }
 
 let setupDone: Promise<void> | null = null;
@@ -241,6 +239,7 @@ export function handleLoad(msg: LoadMessage): Promise<void> {
 
 async function doLoad(msg: LoadMessage): Promise<void> {
   await setupPlayer();
+
   const p = getOrCreatePlayers();
 
   const cookieUrl = msg.tracks[0]?.url;
@@ -258,6 +257,8 @@ async function doLoad(msg: LoadMessage): Promise<void> {
   const headers = cookieHeader ? { Cookie: cookieHeader } : undefined;
 
   if (!msg.tracks.length || msg.startIndex < 0 || msg.startIndex >= msg.tracks.length) return;
+
+  requestBatteryOptimizationExemption();
 
   queue = msg.tracks.map((t) => ({
     uri: Platform.OS === 'android' ? stripBlockingParam(t.url) : t.url,
