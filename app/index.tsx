@@ -15,7 +15,7 @@ import { clearHandlers, dispatch, registerHandlers } from '../services/bridge-di
 import { getIdentityHandlers } from '../services/identity-bridge';
 import { posthog } from '../services/posthog';
 import { isDeepLink, openDeepLink } from '../services/url-bridge';
-import { getInitialUrl, saveLastUrl } from '../services/url-storage';
+import { getInitialURL, saveLastURL } from '../services/url-storage';
 
 // e.g. 3ook-com-app/1.1.0 (iOS 18.0) Build/42
 const USER_AGENT = (() => {
@@ -29,10 +29,10 @@ const USER_AGENT = (() => {
 export default function App() {
   const insets = useSafeAreaInsets();
   const webViewRef = useRef<WebView>(null);
-  const [initialUrl, setInitialUrl] = useState<string | null>(null);
+  const [initialURL, setInitialURL] = useState<string | null>(null);
 
   useEffect(() => {
-    getInitialUrl().then(setInitialUrl);
+    getInitialURL().then(setInitialURL);
   }, []);
 
   const sendToWebView = useCallback((data: object) => {
@@ -80,7 +80,7 @@ export default function App() {
     (navState: { url?: string }) => {
       if (!navState.url) return;
       if (saveTimer.current) clearTimeout(saveTimer.current);
-      saveTimer.current = setTimeout(() => saveLastUrl(navState.url!), 1500);
+      saveTimer.current = setTimeout(() => saveLastURL(navState.url!), 1500);
     },
     []
   );
@@ -108,10 +108,10 @@ export default function App() {
     <>
       <View style={[styles.topSpacer, { height: insets.top }]} />
       <View style={styles.container}>
-        {initialUrl && (
+        {initialURL && (
           <WebView
             ref={webViewRef}
-            source={{ uri: initialUrl }}
+            source={{ uri: initialURL }}
             originWhitelist={['*']}
             style={styles.webview}
             userAgent={USER_AGENT}

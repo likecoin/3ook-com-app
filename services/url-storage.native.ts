@@ -4,16 +4,16 @@ const storageFile = new File(Paths.document, 'last-url.json');
 const BASE_URL = 'https://3ook.com';
 const MAX_AGE_MS = 24 * 60 * 60 * 1000; // 24 hours
 // Refresh the persisted timestamp at most once per hour when the URL is
-// unchanged, so getInitialUrl's staleness check reflects "last visited", not
+// unchanged, so getInitialURL's staleness check reflects "last visited", not
 // "last URL change".
 const REFRESH_INTERVAL_MS = 60 * 60 * 1000; // 1 hour
 
-interface StoredUrl {
+interface StoredURL {
   url: string;
   timestamp: number;
 }
 
-function is3ookUrl(url: string): boolean {
+function is3ookURL(url: string): boolean {
   try {
     const parsed = new URL(url);
     return (
@@ -34,14 +34,14 @@ function ensureAppParam(url: string): string {
   }
 }
 
-let lastSavedUrl: string | null = null;
+let lastSavedURL: string | null = null;
 let lastSavedAt = 0;
 
-export function saveLastUrl(url: string): void {
-  if (!is3ookUrl(url)) return;
+export function saveLastURL(url: string): void {
+  if (!is3ookURL(url)) return;
   const now = Date.now();
-  if (url === lastSavedUrl && now - lastSavedAt < REFRESH_INTERVAL_MS) return;
-  lastSavedUrl = url;
+  if (url === lastSavedURL && now - lastSavedAt < REFRESH_INTERVAL_MS) return;
+  lastSavedURL = url;
   lastSavedAt = now;
   try {
     storageFile.write(JSON.stringify({ url, timestamp: now }));
@@ -50,15 +50,15 @@ export function saveLastUrl(url: string): void {
   }
 }
 
-export async function getInitialUrl(): Promise<string> {
+export async function getInitialURL(): Promise<string> {
   const fallback = `${BASE_URL}?app=1`;
   try {
     const raw = await storageFile.text();
-    const data: StoredUrl = JSON.parse(raw);
+    const data: StoredURL = JSON.parse(raw);
     const now = Date.now();
     if (!Number.isFinite(data.timestamp) || data.timestamp > now) return fallback;
     if (now - data.timestamp > MAX_AGE_MS) return fallback;
-    if (!is3ookUrl(data.url)) return fallback;
+    if (!is3ookURL(data.url)) return fallback;
     return ensureAppParam(data.url);
   } catch {
     return fallback;

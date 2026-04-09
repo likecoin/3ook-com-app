@@ -1,2 +1,2 @@
-export function saveLastUrl(url: string): void;
-export function getInitialUrl(): Promise<string>;
+export function saveLastURL(url: string): void;
+export function getInitialURL(): Promise<string>;
