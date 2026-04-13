@@ -89,7 +89,8 @@
         }
       ],
       "@react-native-firebase/app",
-      "expo-sharing"
+      "expo-sharing",
+      "./plugins/withAppBoundDomains"
     ],
     "experiments": {
       "typedRoutes": true,
