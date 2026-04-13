@@ -22,3 +22,7 @@ export function isDeepLink(url: string): boolean {
 export async function openDeepLink(url: string): Promise<void> {
   await Linking.openURL(url);
 }
+
+export async function openExternalURL(url: string): Promise<void> {
+  await Linking.openURL(url);
+}
