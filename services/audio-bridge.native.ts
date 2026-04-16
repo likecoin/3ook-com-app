@@ -349,7 +349,15 @@ export function handleSkipTo(index: number, { resetFinishGuard = true } = {}): v
   const lastIndex = currentIndex;
   currentIndex = index;
 
-  if (preload.readyIndex === index) {
+  // In background, playbackStatusUpdate on the idle player may be
+  // suspended/coalesced by iOS, so preload.readyIndex never flips even
+  // after the idle player has fully buffered. Fall back to querying
+  // isLoaded synchronously — if the idle was replaced with this index
+  // and is loaded, swapping still beats a fresh replace() on the active
+  // player (which triggers a blocking=1 TTS round trip on iOS).
+  const idle = getIdlePlayer();
+  const idleHasThisTrack = preload.readyIndex === index || preload.loadingIndex === index;
+  if (idleHasThisTrack && idle?.isLoaded) {
     swapToIdle(queue[currentIndex]);
   } else {
     resetIdle();
