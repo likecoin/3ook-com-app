@@ -9,6 +9,7 @@ import type {
 } from 'react-native-webview/lib/WebViewTypes';
 
 import packageJson from '../package.json';
+import { isAppBoundHost } from '../services/app-bound-domains';
 import {
   getAudioHandlers,
   registerEventListeners,
@@ -18,7 +19,7 @@ import { clearHandlers, dispatch, registerHandlers } from '../services/bridge-di
 import { getDownloadHandlers } from '../services/download-bridge';
 import { getIdentityHandlers } from '../services/identity-bridge';
 import { posthog } from '../services/posthog';
-import { isDeepLink, openDeepLink } from '../services/url-bridge';
+import { isDeepLink, openDeepLink, openExternalURL } from '../services/url-bridge';
 import { getInitialURL, saveLastURL } from '../services/url-storage';
 
 // e.g. 3ook-com-app/1.1.0 (iOS 18.0) Build/42
@@ -66,8 +67,9 @@ export default function App() {
     webViewRef.current?.reload();
   }, []);
 
-  // Intercept wallet deep links (wc:, metamask:, etc.) that JS SDKs
-  // trigger via navigation rather than postMessage.
+  // Intercept wallet deep links (wc:, metamask:, etc.) and route non-app-bound
+  // top-frame navigations to the system browser — WebKit's app-bound enforcement
+  // would otherwise silently block them.
   const handleNavigationRequest = useCallback(
     (request: ShouldStartLoadRequest) => {
       if (isDeepLink(request.url)) {
@@ -76,7 +78,20 @@ export default function App() {
         );
         return false;
       }
-      return true;
+      // Leave iframes to WebKit; non-app-bound iframe loads (e.g. Stripe's
+      // metrics iframe) get silently blocked there, which is intended.
+      if (request.isTopFrame === false) return true;
+      try {
+        const parsed = new URL(request.url);
+        if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') return true;
+        if (isAppBoundHost(parsed.hostname)) return true;
+        openExternalURL(request.url).catch((e) =>
+          console.warn('[external link] failed to open:', request.url, e)
+        );
+        return false;
+      } catch {
+        return true;
+      }
     },
     []
   );
@@ -139,6 +154,7 @@ export default function App() {
             allowsInlineMediaPlayback={true}
             pullToRefreshEnabled={true}
             allowsBackForwardNavigationGestures={true}
+            limitsNavigationsToAppBoundDomains={Platform.OS === 'ios'}
             webviewDebuggingEnabled={__DEV__}
             onShouldStartLoadWithRequest={handleNavigationRequest}
             onNavigationStateChange={handleNavigationStateChange}
