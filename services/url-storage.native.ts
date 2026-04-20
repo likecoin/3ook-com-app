@@ -50,6 +50,11 @@ export function saveLastURL(url: string): void {
   }
 }
 
+export function resolveDeepLinkURL(url: string | null | undefined): string | null {
+  if (!url || !is3ookURL(url)) return null;
+  return ensureAppParam(url);
+}
+
 export async function getInitialURL(): Promise<string> {
   const fallback = `${BASE_URL}?app=1`;
   try {
