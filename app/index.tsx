@@ -19,6 +19,12 @@ import {
 import { clearHandlers, dispatch, registerHandlers } from '../services/bridge-dispatcher';
 import { getDownloadHandlers } from '../services/download-bridge';
 import { getIdentityHandlers } from '../services/identity-bridge';
+import {
+  getIntercomHandlers,
+  isIntercomAvailable,
+  registerIntercomEventListeners,
+  wrapIdentityHandlers,
+} from '../services/intercom-bridge';
 import { posthog } from '../services/posthog';
 import { isDeepLink, openDeepLink, openExternalURL } from '../services/url-bridge';
 import { getInitialURL, resolveDeepLinkURL, saveLastURL } from '../services/url-storage';
@@ -31,6 +37,14 @@ const USER_AGENT = (() => {
   const osName = Platform.OS === 'ios' ? 'iOS' : 'Android';
   return `3ook-com-app/${appVersion} (${osName} ${Platform.Version})${buildToken}`;
 })();
+
+// Capability advertisement so web can detect what this build supports without
+// pinning to a build number. Add a string here when introducing a new
+// bridge that web should be able to feature-detect.
+const NATIVE_BRIDGE_FEATURES: readonly string[] = [
+  ...(isIntercomAvailable() ? ['intercom'] : []),
+];
+const NATIVE_BRIDGE_BOOTSTRAP = `(function(){try{window.__nativeBridge=window.__nativeBridge||{};window.__nativeBridge.features=${JSON.stringify(NATIVE_BRIDGE_FEATURES)};}catch(e){}})();true;`;
 
 export default function App() {
   const insets = useSafeAreaInsets();
@@ -71,12 +85,15 @@ export default function App() {
   useEffect(() => {
     registerHandlers(getAudioHandlers());
     registerHandlers(getDownloadHandlers());
-    registerHandlers(getIdentityHandlers(posthog));
+    registerHandlers(getIntercomHandlers());
+    registerHandlers(wrapIdentityHandlers(getIdentityHandlers(posthog)));
 
     setupPlayer();
-    const unsubscribe = registerEventListeners(sendToWebView);
+    const unsubscribeAudio = registerEventListeners(sendToWebView);
+    const unsubscribeIntercom = registerIntercomEventListeners(sendToWebView);
     return () => {
-      unsubscribe();
+      unsubscribeAudio();
+      unsubscribeIntercom();
       clearHandlers();
     };
   }, [sendToWebView]);
@@ -177,6 +194,7 @@ export default function App() {
             allowsBackForwardNavigationGestures={true}
             limitsNavigationsToAppBoundDomains={Platform.OS === 'ios'}
             webviewDebuggingEnabled={__DEV__}
+            injectedJavaScriptBeforeContentLoaded={NATIVE_BRIDGE_BOOTSTRAP}
             onShouldStartLoadWithRequest={handleNavigationRequest}
             onNavigationStateChange={handleNavigationStateChange}
             onMessage={handleMessage}
