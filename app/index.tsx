@@ -120,9 +120,10 @@ export default function App() {
     (navState: WebViewNavigation) => {
       canGoBackRef.current = navState.canGoBack;
       if (!navState.url) return;
-      currentURLRef.current = navState.url;
+      const resolvedURL = resolveDeepLinkURL(navState.url) ?? navState.url;
+      currentURLRef.current = resolvedURL;
       if (saveTimer.current) clearTimeout(saveTimer.current);
-      saveTimer.current = setTimeout(() => saveLastURL(navState.url), 1500);
+      saveTimer.current = setTimeout(() => saveLastURL(resolvedURL), 1500);
     },
     []
   );

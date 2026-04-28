@@ -16,6 +16,7 @@ interface StoredURL {
 function is3ookURL(url: string): boolean {
   try {
     const parsed = new URL(url);
+    if (parsed.protocol !== 'https:') return false;
     return (
       parsed.hostname === '3ook.com' || parsed.hostname.endsWith('.3ook.com')
     );
