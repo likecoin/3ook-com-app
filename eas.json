@@ -7,15 +7,15 @@
     "development": {
       "developmentClient": true,
       "distribution": "internal",
-      "cache": { "key": "a7fe058" }
+      "cache": { "key": "762e5be-intercom" }
     },
     "preview": {
       "distribution": "internal",
-      "cache": { "key": "a7fe058" }
+      "cache": { "key": "762e5be-intercom" }
     },
     "production": {
       "autoIncrement": true,
-      "cache": { "key": "a7fe058" }
+      "cache": { "key": "762e5be-intercom" }
     }
   },
   "submit": {
