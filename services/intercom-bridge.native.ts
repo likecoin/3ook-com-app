@@ -32,29 +32,70 @@ async function safeCall<T>(label: string, fn: () => Promise<T>): Promise<T | und
   try {
     return await fn();
   } catch (e) {
-    console.warn(`[intercom] ${label} failed`, e);
+    if (__DEV__) {
+      // RN's default console formatter truncates the bridge error fields;
+      // destructure so Intercom's underlying NSError surfaces in Metro.
+      const err = e as { code?: string; message?: string; userInfo?: unknown };
+      console.warn(`[intercom] ${label} failed`, {
+        code: err.code,
+        message: err.message,
+        userInfo: err.userInfo,
+      });
+    } else {
+      console.warn(`[intercom] ${label} failed`, e);
+    }
     return undefined;
   }
+}
+
+// All Intercom SDK ops share a single underlying user/session state. The web
+// posts `identifyUser` and `intercomShow` independently, and each WebView
+// message dispatches in parallel — so without a queue, `present()` can race
+// `loginUserWithUserAttributes` and the messenger may open as a guest for an
+// identified user (or hit "Content could not be loaded" before either login
+// lands). Serialize all Intercom ops in dispatch order.
+let intercomQueue: Promise<unknown> = Promise.resolve();
+function serialize<T>(fn: () => Promise<T>): Promise<T> {
+  const next = intercomQueue.catch(() => undefined).then(fn);
+  intercomQueue = next.catch(() => undefined);
+  return next;
 }
 
 export function getIntercomHandlers(): BridgeHandlerMap {
   if (!loadedIntercom) return {};
   const { Intercom } = loadedIntercom;
 
+  // The native SDK refuses to render the messenger ("Content could not be
+  // loaded") if no user session exists. Identified users are registered via
+  // `identifyUser`; for guests we register an unidentified session on demand.
+  async function ensureSession() {
+    const loggedIn = await safeCall('isUserLoggedIn', () => Intercom.isUserLoggedIn());
+    if (loggedIn) return;
+    await safeCall('loginUnidentifiedUser', () => Intercom.loginUnidentifiedUser());
+  }
+
   return {
     intercomShow: async () => {
-      await safeCall('present', () => Intercom.present());
+      await serialize(async () => {
+        await ensureSession();
+        await safeCall('present', () => Intercom.present());
+      });
     },
 
     intercomShowNewMessage: async (msg) => {
       const initial = typeof msg.message === 'string' ? msg.message : undefined;
-      await safeCall('presentMessageComposer', () => Intercom.presentMessageComposer(initial));
+      await serialize(async () => {
+        await ensureSession();
+        await safeCall('presentMessageComposer', () => Intercom.presentMessageComposer(initial));
+      });
     },
 
     intercomLogout: async () => {
-      await safeCall('logout', () => Intercom.logout());
+      await serialize(() => safeCall('logout', () => Intercom.logout()));
     },
 
+    // logEvent is buffered by Intercom pre-login, so it doesn't need to wait
+    // behind a slow `loginUserWithUserAttributes` in the serial queue.
     intercomTrackEvent: async (msg) => {
       const name = typeof msg.name === 'string' ? msg.name : undefined;
       if (!name) return;
@@ -107,17 +148,16 @@ export function wrapIdentityHandlers(base: BridgeHandlerMap): BridgeHandlerMap {
     );
   }
 
-  async function intercomReset() {
-    await safeCall('logout', () => Intercom.logout());
-  }
-
   return {
     ...base,
     identifyUser: async (msg) => {
-      await Promise.all([base.identifyUser?.(msg), intercomIdentify(msg)]);
+      await Promise.all([base.identifyUser?.(msg), serialize(() => intercomIdentify(msg))]);
     },
     resetUser: async (msg) => {
-      await Promise.all([base.resetUser?.(msg), intercomReset()]);
+      await Promise.all([
+        base.resetUser?.(msg),
+        serialize(() => safeCall('logout', () => Intercom.logout())),
+      ]);
     },
   };
 }
