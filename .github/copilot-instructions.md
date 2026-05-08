@@ -34,6 +34,10 @@
   - Central registry/dispatcher for message handlers keyed by `type`.
 - `services/audio-bridge.native.ts`
   - Main native audio engine (`expo-audio`) with queueing, preload/swap logic, lock screen integration, interruption handling, and cookie forwarding.
+- `services/download-bridge.native.ts`
+  - Handles WebView-triggered file downloads and base64 data saves from bridge messages.
+- `services/identity-bridge.native.ts` + `services/intercom-bridge.native.ts`
+  - Handle app/user identity sync, Intercom session updates, and push-permission-related bridge flows.
 - `services/*.native.ts` + `services/*.web.ts` + `services/*.d.ts`
   - Platform-split pattern used across bridges. Keep signatures aligned with the `.d.ts` facade.
 - `services/url-storage.native.ts`
@@ -57,7 +61,7 @@
 
 ## Errors encountered during onboarding and workarounds
 1. **Stale plugin reference in agent docs**
-   - Encountered: the current `AGENTS.md`/`CLAUDE.md` files mention `plugins/withAndroidAudioService.js`, but this file does not exist in the repository.
+   - Encountered: a legacy agent-doc reference points to `plugins/withAndroidAudioService.js`, but this file does not exist in the repository.
    - Workaround: treat `plugins/withAppBoundDomains.js` and the plugin list in `app.config.ts` as the canonical plugin configuration sources.
 
 2. **No `app.json` present**
