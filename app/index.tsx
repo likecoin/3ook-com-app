@@ -22,7 +22,9 @@ import { getIdentityHandlers } from '../services/identity-bridge';
 import {
   getIntercomHandlers,
   isIntercomAvailable,
+  isIntercomPushSupported,
   registerIntercomEventListeners,
+  resyncPushStatusToWeb,
   wrapIdentityHandlers,
 } from '../services/intercom-bridge';
 import { posthog } from '../services/posthog';
@@ -43,6 +45,9 @@ const USER_AGENT = (() => {
 // bridge that web should be able to feature-detect.
 const NATIVE_BRIDGE_FEATURES: readonly string[] = [
   ...(isIntercomAvailable() ? ['intercom'] : []),
+  // Push is currently routed through the Intercom handler (`requestPushPermission`,
+  // `pushPermissionChanged`); advertise only when both are usable.
+  ...(isIntercomPushSupported() ? ['intercomPush'] : []),
 ];
 const NATIVE_BRIDGE_BOOTSTRAP = `(function(){try{window.__nativeBridge=window.__nativeBridge||{};window.__nativeBridge.features=${JSON.stringify(NATIVE_BRIDGE_FEATURES)};}catch(e){}})();true;`;
 
@@ -85,8 +90,8 @@ export default function App() {
   useEffect(() => {
     registerHandlers(getAudioHandlers());
     registerHandlers(getDownloadHandlers());
-    registerHandlers(getIntercomHandlers());
-    registerHandlers(wrapIdentityHandlers(getIdentityHandlers(posthog)));
+    registerHandlers(getIntercomHandlers(sendToWebView));
+    registerHandlers(wrapIdentityHandlers(getIdentityHandlers(posthog), sendToWebView));
 
     setupPlayer();
     const unsubscribeAudio = registerEventListeners(sendToWebView);
@@ -102,6 +107,14 @@ export default function App() {
   const handleContentProcessDidTerminate = useCallback(() => {
     webViewRef.current?.reload();
   }, []);
+
+  // Each WebView load lands in a fresh JS context with no memory of prior
+  // dispatches; re-emit native state that web listeners want at boot.
+  const handleLoadEnd = useCallback(() => {
+    if (isIntercomPushSupported()) {
+      resyncPushStatusToWeb(sendToWebView);
+    }
+  }, [sendToWebView]);
 
   // Intercept wallet deep links (wc:, metamask:, etc.) and route non-app-bound
   // top-frame navigations to the system browser — WebKit's app-bound enforcement
@@ -198,6 +211,7 @@ export default function App() {
             onShouldStartLoadWithRequest={handleNavigationRequest}
             onNavigationStateChange={handleNavigationStateChange}
             onMessage={handleMessage}
+            onLoadEnd={handleLoadEnd}
             onContentProcessDidTerminate={handleContentProcessDidTerminate}
             onError={(e) => console.warn('[WebView error]', e.nativeEvent)}
             onHttpError={(e) => console.warn('[WebView HTTP error]', e.nativeEvent)}

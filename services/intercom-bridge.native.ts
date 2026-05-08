@@ -1,7 +1,16 @@
 import type { EmitterSubscription } from 'react-native';
-import { DeviceEventEmitter, NativeEventEmitter, NativeModules, Platform } from 'react-native';
+import { AppState, DeviceEventEmitter, NativeEventEmitter, NativeModules, Platform } from 'react-native';
 
 import type { BridgeHandlerMap, SendToWebView } from './bridge-dispatcher';
+import {
+  addDeviceTokenListener,
+  addNotificationResponseListener,
+  getCurrentDeviceToken,
+  getCurrentPermissionStatus,
+  isPushAvailable,
+  requestPushPermission as requestPushPermissionPrompt,
+} from './push-bridge';
+import type { PushPermissionStatus } from './push-bridge';
 
 type IntercomModuleType = typeof import('@intercom/intercom-react-native');
 type IntercomDefault = IntercomModuleType['default'];
@@ -26,6 +35,22 @@ const loadedIntercom: LoadedIntercom | null = (() => {
 
 export function isIntercomAvailable(): boolean {
   return loadedIntercom !== null;
+}
+
+export function isIntercomPushSupported(): boolean {
+  return isIntercomAvailable() && isPushAvailable();
+}
+
+// Hermes provides atob; decode the middle JWT segment (base64url) for the
+// claims. Header/signature are uninteresting for IV failures, so skip them.
+function decodeJwtPayload(jwt: string): unknown {
+  const segment = jwt.split('.')[1];
+  if (!segment) return undefined;
+  const padded = segment.replace(/-/g, '+').replace(/_/g, '/').padEnd(
+    segment.length + ((4 - (segment.length % 4)) % 4),
+    '='
+  );
+  return JSON.parse(atob(padded));
 }
 
 async function safeCall<T>(label: string, fn: () => Promise<T>): Promise<T | undefined> {
@@ -61,23 +86,135 @@ function serialize<T>(fn: () => Promise<T>): Promise<T> {
   return next;
 }
 
-export function getIntercomHandlers(): BridgeHandlerMap {
+// The native SDK refuses to render the messenger ("Content could not be
+// loaded") if no user session exists. Identified users are registered via
+// `identifyUser`; for guests we register an unidentified session on demand.
+async function ensureSession() {
+  if (!loadedIntercom) return;
+  const { Intercom } = loadedIntercom;
+  const loggedIn = await safeCall('isUserLoggedIn', () => Intercom.isUserLoggedIn());
+  if (loggedIn) return;
+  await safeCall('loginUnidentifiedUser', () => Intercom.loginUnidentifiedUser());
+}
+
+// Caller must invoke this inside the serialize() queue: Identity Verification
+// requires the JWT to land before the token attaches, otherwise the token
+// registers against the prior (or guest) session.
+async function registerPushTokenIfPossible() {
+  if (!loadedIntercom) return;
+  if (!isPushAvailable()) return;
+  const status = await readPushStatus();
+  if (status !== 'granted') return;
+  const { Intercom } = loadedIntercom;
+  const loggedIn = await safeCall('isUserLoggedIn', () => Intercom.isUserLoggedIn());
+  if (!loggedIn) return;
+  const token = await getCurrentDeviceToken();
+  if (!token) return;
+  if (token === lastRegisteredToken) return;
+  // Don't route through safeCall: a swallowed failure here would still flip
+  // the dedupe gate, so a transient SDK/network blip would silently disable
+  // push delivery for the rest of the session.
+  try {
+    await Intercom.sendTokenToIntercom(token);
+    lastRegisteredToken = token;
+  } catch (e) {
+    console.warn('[intercom] sendTokenToIntercom failed', e);
+  }
+}
+
+// Dedupe successive sendTokenToIntercom calls for the same token + session.
+// Cleared whenever the user identity changes (identify / logout) so a token
+// shared across users doesn't get skipped after a switch.
+let lastRegisteredToken: string | null = null;
+
+// `identifyUser` fires on every cold start and session refresh, not just
+// fresh login. iOS's permission status is sticky once it leaves
+// 'undetermined' (only Settings can flip it, handled via foreground sync),
+// so cache the resolved value to skip the native bridge call on the chatty
+// path. Refreshed by syncPushStatus() on app foreground.
+let cachedPushStatus: PushPermissionStatus | null = null;
+async function readPushStatus(): Promise<PushPermissionStatus> {
+  if (cachedPushStatus !== null && cachedPushStatus !== 'undetermined') {
+    return cachedPushStatus;
+  }
+  cachedPushStatus = await getCurrentPermissionStatus();
+  return cachedPushStatus;
+}
+
+// Three call sites emit pushPermissionChanged with the same payload (foreground
+// sync, identify-time prompt, web-driven request). Skip dispatches when the
+// value hasn't moved so web doesn't react redundantly.
+let lastDispatchedPushStatus: PushPermissionStatus | null = null;
+function dispatchPushStatus(send: SendToWebView, status: PushPermissionStatus): void {
+  if (status === lastDispatchedPushStatus) return;
+  lastDispatchedPushStatus = status;
+  send({ type: 'pushPermissionChanged', status });
+}
+
+// Inner dedupe (lastRegisteredToken) makes eager calls cheap.
+function queueTokenRegistration(): void {
+  serialize(() => registerPushTokenIfPossible());
+}
+
+function applyPushStatus(send: SendToWebView, status: PushPermissionStatus): void {
+  cachedPushStatus = status;
+  dispatchPushStatus(send, status);
+  if (status === 'granted') queueTokenRegistration();
+}
+
+async function syncPushStatus(send: SendToWebView): Promise<void> {
+  if (!isPushAvailable()) return;
+  try {
+    applyPushStatus(send, await getCurrentPermissionStatus());
+  } catch (e) {
+    console.warn('[intercom] push status check failed', e);
+  }
+}
+
+// WebView reloads (e.g. after iOS kills the content process) land in a fresh
+// JS context with no memory of prior dispatches; reset the dedupe so the
+// next emit lands instead of being suppressed.
+export function resyncPushStatusToWeb(send: SendToWebView): Promise<void> {
+  lastDispatchedPushStatus = null;
+  return syncPushStatus(send);
+}
+
+// Intercom RN's native `isIntercomPushNotification:` helper isn't bridged to
+// JS, so detect Intercom pushes by looking for known payload keys. False
+// positives here are bounded — the worst case is opening the messenger for a
+// foreign push, which the user can dismiss.
+function looksLikeIntercomPush(data: unknown): boolean {
+  if (!data || typeof data !== 'object') return false;
+  const d = data as Record<string, unknown>;
+  return 'conversation_id' in d || 'intercom_push_type' in d || 'instance_id' in d;
+}
+
+// Tapping a push notification launches the app via getInitialURL and the
+// expo-notifications response listener consumes the tap event before Intercom
+// ever sees it, so the messenger never auto-opens. Detect Intercom pushes
+// ourselves and present the messenger through the serialize queue so the
+// present call orders correctly against any in-flight identifyUser.
+function handleIntercomNotificationTap(data: unknown): void {
+  if (!loadedIntercom) return;
+  if (!looksLikeIntercomPush(data)) return;
+  const { Intercom } = loadedIntercom;
+  serialize(async () => {
+    await ensureSession();
+    await safeCall('present', () => Intercom.present());
+  });
+}
+
+export function getIntercomHandlers(send: SendToWebView): BridgeHandlerMap {
   if (!loadedIntercom) return {};
   const { Intercom } = loadedIntercom;
-
-  // The native SDK refuses to render the messenger ("Content could not be
-  // loaded") if no user session exists. Identified users are registered via
-  // `identifyUser`; for guests we register an unidentified session on demand.
-  async function ensureSession() {
-    const loggedIn = await safeCall('isUserLoggedIn', () => Intercom.isUserLoggedIn());
-    if (loggedIn) return;
-    await safeCall('loginUnidentifiedUser', () => Intercom.loginUnidentifiedUser());
-  }
 
   return {
     intercomShow: async () => {
       await serialize(async () => {
         await ensureSession();
+        // Guests can also receive admin replies via push; register the token
+        // once a session exists.
+        await registerPushTokenIfPossible();
         await safeCall('present', () => Intercom.present());
       });
     },
@@ -86,12 +223,16 @@ export function getIntercomHandlers(): BridgeHandlerMap {
       const initial = typeof msg.message === 'string' ? msg.message : undefined;
       await serialize(async () => {
         await ensureSession();
+        await registerPushTokenIfPossible();
         await safeCall('presentMessageComposer', () => Intercom.presentMessageComposer(initial));
       });
     },
 
     intercomLogout: async () => {
-      await serialize(() => safeCall('logout', () => Intercom.logout()));
+      await serialize(async () => {
+        lastRegisteredToken = null;
+        await safeCall('logout', () => Intercom.logout());
+      });
     },
 
     // logEvent is buffered by Intercom pre-login, so it doesn't need to wait
@@ -105,10 +246,34 @@ export function getIntercomHandlers(): BridgeHandlerMap {
           : undefined;
       await safeCall('logEvent', () => Intercom.logEvent(name, metaData));
     },
+
+    requestPushPermission: async () => {
+      await runPushPrompt(send);
+    },
   };
 }
 
-export function wrapIdentityHandlers(base: BridgeHandlerMap): BridgeHandlerMap {
+// Safe to call outside the Intercom serialize queue — applyPushStatus's
+// queueTokenRegistration re-enters the queue itself.
+async function runPushPrompt(send: SendToWebView): Promise<void> {
+  applyPushStatus(send, await requestPushPermissionPrompt());
+}
+
+// Push delivery requires the runtime permission prompt to have fired at
+// least once. The OS treats the decision as sticky — once status leaves
+// 'undetermined' it doesn't return — so the gate alone is sufficient,
+// no local persistence needed.
+async function maybePromptForPushPermission(send: SendToWebView): Promise<void> {
+  if (!isPushAvailable()) return;
+  const status = await readPushStatus();
+  if (status !== 'undetermined') return;
+  await runPushPrompt(send);
+}
+
+export function wrapIdentityHandlers(
+  base: BridgeHandlerMap,
+  send: SendToWebView,
+): BridgeHandlerMap {
   if (!loadedIntercom) return base;
   const { Intercom } = loadedIntercom;
 
@@ -127,6 +292,25 @@ export function wrapIdentityHandlers(base: BridgeHandlerMap): BridgeHandlerMap {
           : undefined;
     const email = typeof msg.email === 'string' ? msg.email : undefined;
     if (!userId && !email) return;
+
+    if (__DEV__) {
+      try {
+        // Log only IDs/timestamps — email and custom attributes can land in
+        // crash-reporter breadcrumbs from dev builds.
+        const payload = decodeJwtPayload(intercomToken) as
+          | Record<string, unknown>
+          | undefined;
+        if (payload) {
+          console.log('[intercom] jwt claims', {
+            user_id: payload.user_id,
+            exp: payload.exp,
+            iat: payload.iat,
+          });
+        }
+      } catch (e) {
+        console.warn('[intercom] failed to decode jwt', e);
+      }
+    }
 
     // setUserJwt must be called before loginUserWithUserAttributes for
     // JWT verification to take effect.
@@ -151,12 +335,27 @@ export function wrapIdentityHandlers(base: BridgeHandlerMap): BridgeHandlerMap {
   return {
     ...base,
     identifyUser: async (msg) => {
-      await Promise.all([base.identifyUser?.(msg), serialize(() => intercomIdentify(msg))]);
+      await Promise.all([
+        base.identifyUser?.(msg),
+        serialize(async () => {
+          // The token attached to the prior guest/user session must be
+          // re-sent so it migrates to the now-identified Intercom user.
+          lastRegisteredToken = null;
+          await intercomIdentify(msg);
+          await registerPushTokenIfPossible();
+        }),
+        // Outside serialize so the modal prompt doesn't stall queued Intercom
+        // ops; post-grant registration re-enters the queue itself.
+        maybePromptForPushPermission(send),
+      ]);
     },
     resetUser: async (msg) => {
       await Promise.all([
         base.resetUser?.(msg),
-        serialize(() => safeCall('logout', () => Intercom.logout())),
+        serialize(async () => {
+          lastRegisteredToken = null;
+          await safeCall('logout', () => Intercom.logout());
+        }),
       ]);
     },
   };
@@ -208,7 +407,30 @@ export function registerIntercomEventListeners(send: SendToWebView): () => void 
     })
   );
 
+  // APNs/FCM rotates tokens occasionally (app restore, FCM key roll); the
+  // registration helper gates on session+permission so this is safe to fire
+  // eagerly.
+  const unsubToken = addDeviceTokenListener(() => {
+    queueTokenRegistration();
+  });
+
+  // expo-notifications buffers the most recent response until a JS listener
+  // attaches, so registering here (from useEffect on mount) is early enough to
+  // catch cold-launch taps as well as warm-app taps.
+  const unsubResponse = addNotificationResponseListener(handleIntercomNotificationTap);
+
+  // First sync is now driven by WebView onLoadEnd via resyncPushStatusToWeb,
+  // which guarantees the web JS context exists to receive the dispatch.
+  // Foreground transitions still need their own re-check because Settings
+  // can flip permission while the app is backgrounded.
+  const appStateSub = AppState.addEventListener('change', (next) => {
+    if (next === 'active') syncPushStatus(send);
+  });
+
   return () => {
+    unsubToken();
+    unsubResponse();
+    appStateSub.remove();
     for (const s of subs) s.remove();
   };
 }
