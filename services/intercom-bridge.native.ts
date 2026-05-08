@@ -7,6 +7,7 @@ import {
   addNotificationResponseListener,
   getCurrentDeviceToken,
   getCurrentPermissionStatus,
+  hasPromptedBefore,
   isPushAvailable,
   requestPushPermission as requestPushPermissionPrompt,
 } from './push-bridge';
@@ -259,14 +260,19 @@ async function runPushPrompt(send: SendToWebView): Promise<void> {
   applyPushStatus(send, await requestPushPermissionPrompt());
 }
 
-// Push delivery requires the runtime permission prompt to have fired at
-// least once. The OS treats the decision as sticky — once status leaves
-// 'undetermined' it doesn't return — so the gate alone is sufficient,
-// no local persistence needed.
+// 'undetermined' is iOS-only in practice; on Android the never-asked state
+// surfaces as 'denied' (see push-bridge.native.ts). Fall back to the persisted
+// marker so first-launch users on Android still get prompted.
 async function maybePromptForPushPermission(send: SendToWebView): Promise<void> {
   if (!isPushAvailable()) return;
   const status = await readPushStatus();
-  if (status !== 'undetermined') return;
+  if (status === 'granted') return;
+  if (status === 'undetermined') {
+    await runPushPrompt(send);
+    return;
+  }
+  if (Platform.OS !== 'android') return;
+  if (await hasPromptedBefore()) return;
   await runPushPrompt(send);
 }
 

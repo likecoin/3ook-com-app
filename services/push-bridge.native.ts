@@ -1,6 +1,24 @@
+import { File, Paths } from 'expo-file-system';
 import * as Notifications from 'expo-notifications';
 
 import type { PushPermissionStatus } from './push-bridge';
+
+// Persisted across launches because expo-notifications on Android coerces a
+// never-asked POST_NOTIFICATIONS to 'denied' (see NotificationPermissionsModule
+// `!areEnabled -> DENIED`), so the runtime status alone can't tell us whether
+// we've actually surfaced the system dialog yet.
+const promptedMarkerFile = new File(Paths.document, 'push-prompted.marker');
+let prompted = false;
+
+function markPrompted(): void {
+  if (prompted) return;
+  try {
+    promptedMarkerFile.write('1');
+    prompted = true;
+  } catch (e) {
+    console.warn('[push] failed to persist prompt marker', e);
+  }
+}
 
 export function isPushAvailable(): boolean {
   return true;
@@ -29,11 +47,18 @@ export async function requestPushPermission(): Promise<PushPermissionStatus> {
         allowSound: true,
       },
     });
+    markPrompted();
     return result.status as PushPermissionStatus;
   } catch (e) {
     console.warn('[push] requestPermissionsAsync failed', e);
     return 'denied';
   }
+}
+
+export async function hasPromptedBefore(): Promise<boolean> {
+  if (prompted) return true;
+  prompted = promptedMarkerFile.exists;
+  return prompted;
 }
 
 export async function getCurrentDeviceToken(): Promise<string | null> {

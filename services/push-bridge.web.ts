@@ -12,6 +12,10 @@ export async function requestPushPermission(): Promise<PushPermissionStatus> {
   return 'undetermined';
 }
 
+export async function hasPromptedBefore(): Promise<boolean> {
+  return false;
+}
+
 export async function getCurrentDeviceToken(): Promise<string | null> {
   return null;
 }
