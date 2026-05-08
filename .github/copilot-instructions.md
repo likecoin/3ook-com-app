@@ -57,8 +57,8 @@
 
 ## Errors encountered during onboarding and workarounds
 1. **Stale plugin reference in agent docs**
-   - Encountered: `AGENTS.md`/`CLAUDE.md` mention `plugins/withAndroidAudioService.js`, but this file does not exist in the repository.
-   - Workaround: use current plugin sources from `plugins/withAppBoundDomains.js` and `app.config.ts` plugin list as the canonical configuration reference.
+   - Encountered: the current `AGENTS.md`/`CLAUDE.md` files mention `plugins/withAndroidAudioService.js`, but this file does not exist in the repository.
+   - Workaround: treat `plugins/withAppBoundDomains.js` and the plugin list in `app.config.ts` as the canonical plugin configuration sources.
 
 2. **No `app.json` present**
    - Encountered: Expo app config is not in `app.json`.
