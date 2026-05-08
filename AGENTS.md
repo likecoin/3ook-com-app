@@ -26,21 +26,32 @@ The web app itself lives in a separate repo (`liker-land-v3`, a Nuxt 3 PWA). Thi
 
 ### How it works
 
-1. **`app/index.tsx`** — Single-screen app rendering a full-screen `WebView` at `https://3ook.com?app=1`. Listens for `postMessage` events from the web app.
-2. **`services/audio-bridge.native.ts`** — Imperative audio engine using `expo-audio`. Manages a single `AudioPlayer`, a manual track queue, cookie forwarding (Cloudflare Access auth), lock screen controls, and auto-advancement.
-3. **`services/audio-bridge.web.ts`** — No-op stub so web builds compile without native audio dependencies.
-4. **`services/audio-bridge.d.ts`** — Shared type declarations for the platform-split module.
-5. **`plugins/withAndroidAudioService.js`** — Config plugin registering Android `AudioControlsService` for foreground media playback.
+1. **`app/index.tsx`** — Single-screen app rendering a full-screen `WebView` at `https://3ook.com?app=1`. Wires up `postMessage` ingestion, deep-link / Universal Link / App Link handling, native back navigation, and capability advertisement (`window.__nativeBridge.features` injected via `injectedJavaScriptBeforeContentLoaded`).
+2. **`services/bridge-dispatcher.ts`** — Central registry/dispatcher. Each bridge registers handlers keyed by message `type`; `dispatch(raw)` parses JSON and routes to the matching handler.
+3. **`services/audio-bridge.native.ts`** — Imperative audio engine using `expo-audio`. Manages a single `AudioPlayer`, a manual track queue, cookie forwarding (Cloudflare Access auth), lock screen controls, preload/swap, and auto-advancement.
+4. **`services/download-bridge.native.ts`** — Handles the `fileDownloadData` bridge message by writing a base64 payload to cache and sharing the saved file.
+5. **`services/identity-bridge.native.ts`** — Fans `identifyUser` out to PostHog, Firebase Analytics, and Sentry. Firebase gets the pre-hashed `gaUserId` (SHA-256 wallet) that the web also feeds to gtag so GA4's no-PII rule holds and app + web sessions stitch.
+6. **`services/intercom-bridge.native.ts`** — Intercom session updates and push-permission flows; conditionally enabled by env vars (`INTERCOM_APP_ID`, `INTERCOM_IOS_API_KEY`, `INTERCOM_ANDROID_API_KEY`).
+7. **`services/push-bridge.native.ts`** — `expo-notifications` permission and token plumbing.
+8. **`services/url-bridge.native.ts`** + **`services/url-storage.native.ts`** — Deep-link parsing, last-visited URL persistence, and outbound external-URL handling. Deep links are accepted only for `3ook.com` and subdomains; URL normalization always enforces `app=1`.
+9. **`services/app-bound-domains.js`** + **`plugins/withAppBoundDomains.js`** — Single source of truth for iOS `WKAppBoundDomains` shared by runtime checks and the config plugin.
+10. **`modules/audio-interruption`** + **`modules/battery-optimization`** — Local Expo native modules autolinked via `package.json#expo.autolinking.nativeModulesDir = "modules"`. iOS audio session interruption hooks; Android battery-optimization-exemption prompt.
 
 ### Key patterns
 
-- **Platform-split modules**: `audio-bridge` uses `.native.ts` / `.web.ts` suffixes with a shared `.d.ts`. Metro resolves the correct file per platform.
-- **WebView ↔ Native bridge**: Web→Native via `postMessage` JSON. Native→Web via `injectJavaScript` dispatching `CustomEvent('nativeAudioEvent')`.
-- **Cookie forwarding**: Audio URLs require Cloudflare Access cookies. The bridge reads cookies via `@preeternal/react-native-cookie-manager` and passes them as request headers to `expo-audio`.
+- **Platform-split modules**: each bridge uses `.native.ts` / `.web.ts` suffixes with a shared `.d.ts` facade. Metro resolves the correct file per platform; web builds compile against no-op stubs.
+- **WebView ↔ Native bridge**: Web→Native via `postMessage` JSON routed through `bridge-dispatcher`. Native→Web via `injectJavaScript` dispatching `CustomEvent('nativeAudioEvent')` or `CustomEvent('nativeBridgeEvent')`.
+- **Capability advertisement**: `NATIVE_BRIDGE_FEATURES` in `app/index.tsx` is injected before content load so the web app can feature-detect what this build supports without pinning to a build number. Add a string here when introducing a new bridge web should detect.
+- **Cookie forwarding**: Audio URLs require Cloudflare Access cookies. The audio bridge reads cookies via `@preeternal/react-native-cookie-manager` and passes them as request headers to `expo-audio`.
+- **Plugin order matters** in `app.config.ts`, notably Intercom vs notification-related plugins.
 
 ### Message protocol
 
-Web app sends JSON via `postMessage` with `type`: `load`, `pause`, `resume`, `stop`, `skipTo`, `setRate`, `seekTo`. Native sends back events (`playbackState`, `trackChanged`, `queueEnded`) via `CustomEvent`.
+Web → Native messages are JSON with `type` and payload fields. Audio types: `load`, `pause`, `resume`, `stop`, `skipTo`, `setRate`, `seekTo`. Other bridges add their own types (e.g. identity sync, Intercom updates, push-permission requests, downloads). Native → Web events are sent as `CustomEvent` from injected JS — `nativeAudioEvent` for audio (`playbackState`, `trackChanged`, `queueEnded`) and `nativeBridgeEvent` for everything else.
+
+### Observability
+
+Sentry (`@sentry/react-native`), Firebase Analytics, and PostHog (`services/posthog.ts`) are wired up. For PostHog details, refer to the code/config in this repo rather than hard-coded account metadata.
 
 ## Commit Messages
 
