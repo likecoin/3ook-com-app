@@ -29,7 +29,7 @@ The web app itself lives in a separate repo (`liker-land-v3`, a Nuxt 3 PWA). Thi
 1. **`app/index.tsx`** — Single-screen app rendering a full-screen `WebView` at `https://3ook.com?app=1`. Wires up `postMessage` ingestion, deep-link / Universal Link / App Link handling, native back navigation, and capability advertisement (`window.__nativeBridge.features` injected via `injectedJavaScriptBeforeContentLoaded`).
 2. **`services/bridge-dispatcher.ts`** — Central registry/dispatcher. Each bridge registers handlers keyed by message `type`; `dispatch(raw)` parses JSON and routes to the matching handler.
 3. **`services/audio-bridge.native.ts`** — Imperative audio engine using `expo-audio`. Manages a single `AudioPlayer`, a manual track queue, cookie forwarding (Cloudflare Access auth), lock screen controls, preload/swap, and auto-advancement.
-4. **`services/download-bridge.native.ts`** — Handles WebView-triggered file downloads and base64 data saves.
+4. **`services/download-bridge.native.ts`** — Handles the `fileDownloadData` bridge message by writing a base64 payload to cache and sharing the saved file.
 5. **`services/identity-bridge.native.ts`** — Fans `identifyUser` out to PostHog, Firebase Analytics, and Sentry. Firebase gets the pre-hashed `gaUserId` (SHA-256 wallet) that the web also feeds to gtag so GA4's no-PII rule holds and app + web sessions stitch.
 6. **`services/intercom-bridge.native.ts`** — Intercom session updates and push-permission flows; conditionally enabled by env vars (`INTERCOM_APP_ID`, `INTERCOM_IOS_API_KEY`, `INTERCOM_ANDROID_API_KEY`).
 7. **`services/push-bridge.native.ts`** — `expo-notifications` permission and token plumbing.
@@ -51,7 +51,7 @@ Web → Native messages are JSON with `type` and payload fields. Audio types: `l
 
 ### Observability
 
-Sentry (`@sentry/react-native`), Firebase Analytics, and PostHog (`services/posthog.ts`) are wired up. PostHog project is **3ook.com** (id 236761) under **Liker Land, Inc.**.
+Sentry (`@sentry/react-native`), Firebase Analytics, and PostHog (`services/posthog.ts`) are wired up. For PostHog details, refer to the code/config in this repo rather than hard-coded account metadata.
 
 ## Commit Messages
 
