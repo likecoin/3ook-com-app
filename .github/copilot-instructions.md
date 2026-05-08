@@ -60,18 +60,14 @@
 - Follow existing commit style when relevant (Gitmoji prefixes are used in docs/examples).
 
 ## Errors encountered during onboarding and workarounds
-1. **Stale plugin reference in agent docs**
-   - Encountered: a legacy agent-doc reference points to `plugins/withAndroidAudioService.js`, but this file does not exist in the repository.
-   - Workaround: treat `plugins/withAppBoundDomains.js` and the plugin list in `app.config.ts` as the canonical plugin configuration sources.
-
-2. **No `app.json` present**
+1. **No `app.json` present**
    - Encountered: Expo app config is not in `app.json`.
    - Workaround: use `app.config.ts` as the source of truth for app metadata, plugins, and environment-variable-driven behavior.
 
-3. **Intercom env vars absent in default environment**
+2. **Intercom env vars absent in default environment**
    - Encountered: commands print `[intercom] INTERCOM_APP_ID / INTERCOM_IOS_API_KEY / INTERCOM_ANDROID_API_KEY missing — Intercom plugin disabled in this build.`
    - Workaround: for tasks unrelated to Intercom, this warning is expected and non-blocking; for Intercom work, define those env vars before running Expo commands.
 
-4. **Dependency health warnings during install**
+3. **Dependency health warnings during install**
    - Encountered: `npm install` reports deprecation warnings and an `npm audit` vulnerability summary.
    - Workaround: these warnings did not block lint/typecheck/export in this repo state; avoid opportunistic dependency churn unless the task explicitly requires upgrades.
