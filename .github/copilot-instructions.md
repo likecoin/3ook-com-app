@@ -1,5 +1,9 @@
 # Copilot Instructions for `likecoin/3ook-com-app`
 
+## Canonical-source note
+- Treat `AGENTS.md` as the canonical shared agent guidance for this repository.
+- This file is a Copilot-focused onboarding layer; when content overlaps, keep both in sync and follow `AGENTS.md` + `.github/workflows/ci.yml` as the source of truth.
+
 ## What this repository is
 - This is the native mobile shell for **3ook.com** (Expo + React Native), not the main web app.
 - The app is primarily a full-screen `WebView` that loads `https://3ook.com?app=1` and extends it with native capabilities (audio playback, downloads, identity/intercom bridges, deep-link handling).
@@ -15,7 +19,8 @@
 
 ## Fastest way to be productive in a fresh cloud-agent session
 1. Install dependencies:
-   - `npm install` (or `npm ci` if lockfile must be strictly honored).
+   - `npm ci` (preferred for reproducible installs and no lockfile churn).
+   - Use `npm install` only when intentionally updating dependencies/lockfile.
 2. Validate before/after changes with the same commands as CI:
    - `npm run lint`
    - `npx tsc --noEmit`
