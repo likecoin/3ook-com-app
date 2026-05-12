@@ -145,6 +145,13 @@ export default function App() {
     }
   }, []);
 
+  const clearRetryTimer = useCallback(() => {
+    if (retryTimerRef.current) {
+      clearTimeout(retryTimerRef.current);
+      retryTimerRef.current = null;
+    }
+  }, []);
+
   const scheduleSpinnerReveal = useCallback(() => {
     if (spinnerTimerRef.current) return;
     spinnerTimerRef.current = setTimeout(() => {
@@ -157,14 +164,11 @@ export default function App() {
   // clobber the retry timer we just set. Use onLoad for the success path.
   const handleLoad = useCallback(() => {
     retryCountRef.current = 0;
-    if (retryTimerRef.current) {
-      clearTimeout(retryTimerRef.current);
-      retryTimerRef.current = null;
-    }
+    clearRetryTimer();
     clearSpinnerTimer();
     setLoadFailed(false);
     setRetryInProgress(false);
-  }, [clearSpinnerTimer]);
+  }, [clearRetryTimer, clearSpinnerTimer]);
 
   // Each WebView load lands in a fresh JS context with no memory of prior
   // dispatches; re-emit native state that web listeners want at boot.
@@ -175,13 +179,10 @@ export default function App() {
   }, [sendToWebView]);
 
   const remountWebView = useCallback(() => {
-    if (retryTimerRef.current) {
-      clearTimeout(retryTimerRef.current);
-      retryTimerRef.current = null;
-    }
+    clearRetryTimer();
     setLoadFailed(false);
     setWebViewKey((k) => k + 1);
-  }, []);
+  }, [clearRetryTimer]);
 
   const handleManualRetry = useCallback(() => {
     trackEvent('webview_load_retry', { trigger: 'manual' });
@@ -208,7 +209,7 @@ export default function App() {
         const delay = AUTO_RETRY_DELAYS_MS[attempt];
         retryCountRef.current = attempt + 1;
         scheduleSpinnerReveal();
-        if (retryTimerRef.current) clearTimeout(retryTimerRef.current);
+        clearRetryTimer();
         retryTimerRef.current = setTimeout(() => {
           retryTimerRef.current = null;
           trackEvent('webview_load_retry', { trigger: 'auto', attempt: attempt + 1 });
@@ -216,25 +217,20 @@ export default function App() {
         }, delay);
       } else {
         clearSpinnerTimer();
+        clearRetryTimer();
         setRetryInProgress(false);
         setLoadFailed(true);
       }
     },
-    [clearSpinnerTimer, remountWebView, scheduleSpinnerReveal]
+    [clearRetryTimer, clearSpinnerTimer, remountWebView, scheduleSpinnerReveal]
   );
 
   useEffect(() => {
     return () => {
-      if (retryTimerRef.current) {
-        clearTimeout(retryTimerRef.current);
-        retryTimerRef.current = null;
-      }
-      if (spinnerTimerRef.current) {
-        clearTimeout(spinnerTimerRef.current);
-        spinnerTimerRef.current = null;
-      }
+      clearRetryTimer();
+      clearSpinnerTimer();
     };
-  }, []);
+  }, [clearRetryTimer, clearSpinnerTimer]);
 
   // Intercept wallet deep links (wc:, metamask:, etc.) and route non-app-bound
   // top-frame navigations to the system browser — WebKit's app-bound enforcement
