@@ -77,7 +77,7 @@ export default function App() {
   const [initialURL, setInitialURL] = useState<string | null>(null);
   const [webViewKey, setWebViewKey] = useState(0);
   const [loadFailed, setLoadFailed] = useState(false);
-  const [retryInProgress, setRetryInProgress] = useState(false);
+  const [isRetryInProgress, setIsRetryInProgress] = useState(false);
   const retryCountRef = useRef(0);
   const retryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const spinnerTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -156,7 +156,7 @@ export default function App() {
     if (spinnerTimerRef.current) return;
     spinnerTimerRef.current = setTimeout(() => {
       spinnerTimerRef.current = null;
-      setRetryInProgress(true);
+      setIsRetryInProgress(true);
     }, SPINNER_REVEAL_DELAY_MS);
   }, []);
 
@@ -167,7 +167,7 @@ export default function App() {
     clearRetryTimer();
     clearSpinnerTimer();
     setLoadFailed(false);
-    setRetryInProgress(false);
+    setIsRetryInProgress(false);
   }, [clearRetryTimer, clearSpinnerTimer]);
 
   // Each WebView load lands in a fresh JS context with no memory of prior
@@ -218,7 +218,7 @@ export default function App() {
       } else {
         clearSpinnerTimer();
         clearRetryTimer();
-        setRetryInProgress(false);
+        setIsRetryInProgress(false);
         setLoadFailed(true);
       }
     },
@@ -349,7 +349,7 @@ export default function App() {
             onHttpError={(e) => console.warn('[WebView HTTP error]', e.nativeEvent)}
           />
         )}
-        {retryInProgress && !loadFailed && (
+        {isRetryInProgress && !loadFailed && (
           <View style={styles.overlay} pointerEvents="none">
             <ActivityIndicator
               size="large"
@@ -397,7 +397,7 @@ const styles = StyleSheet.create({
     bottom: 0,
     alignItems: 'center',
     justifyContent: 'center',
-    backgroundColor: '#ffffff',
+    backgroundColor: '#f9f9f9',
   },
   errorOverlay: {
     paddingHorizontal: 32,
@@ -425,7 +425,7 @@ const styles = StyleSheet.create({
     opacity: 0.7,
   },
   retryButtonText: {
-    color: '#ffffff',
+    color: '#f9f9f9',
     fontSize: 15,
     fontWeight: '600',
   },
