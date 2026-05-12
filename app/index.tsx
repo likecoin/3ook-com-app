@@ -64,10 +64,8 @@ const NATIVE_BRIDGE_BOOTSTRAP = `(function(){try{window.__nativeBridge=window.__
 // (NSURLErrorDomain -1004 cannot-connect-to-host being the most common) before
 // the radio/VPN/captive portal has fully settled. Auto-retry by remounting the
 // WebView via a key bump, then fall back to a manual retry overlay.
-const AUTO_RETRY_DELAYS_MS = [1000, 2500];
+const AUTO_RETRY_DELAYS_MS = [250, 750, 1000, 2500];
 const MAX_AUTO_RETRIES = AUTO_RETRY_DELAYS_MS.length;
-// Delay before revealing the spinner so fast recoveries don't flash UI.
-const SPINNER_REVEAL_DELAY_MS = 500;
 
 export default function App() {
   const insets = useSafeAreaInsets();
@@ -79,8 +77,8 @@ export default function App() {
   const [loadFailed, setLoadFailed] = useState(false);
   const [isRetryInProgress, setIsRetryInProgress] = useState(false);
   const retryCountRef = useRef(0);
+  const hadLoadFailureRef = useRef(false);
   const retryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const spinnerTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(() => {
     (async () => {
@@ -138,13 +136,6 @@ export default function App() {
     webViewRef.current?.reload();
   }, []);
 
-  const clearSpinnerTimer = useCallback(() => {
-    if (spinnerTimerRef.current) {
-      clearTimeout(spinnerTimerRef.current);
-      spinnerTimerRef.current = null;
-    }
-  }, []);
-
   const clearRetryTimer = useCallback(() => {
     if (retryTimerRef.current) {
       clearTimeout(retryTimerRef.current);
@@ -152,23 +143,18 @@ export default function App() {
     }
   }, []);
 
-  const scheduleSpinnerReveal = useCallback(() => {
-    if (spinnerTimerRef.current) return;
-    spinnerTimerRef.current = setTimeout(() => {
-      spinnerTimerRef.current = null;
-      setIsRetryInProgress(true);
-    }, SPINNER_REVEAL_DELAY_MS);
-  }, []);
-
   // Success-only — onLoadEnd also fires on error (after onError), which would
   // clobber the retry timer we just set. Use onLoad for the success path.
   const handleLoad = useCallback(() => {
+    if (hadLoadFailureRef.current) {
+      trackEvent('webview_load_recovered', { retry_count: retryCountRef.current });
+      hadLoadFailureRef.current = false;
+    }
     retryCountRef.current = 0;
     clearRetryTimer();
-    clearSpinnerTimer();
     setLoadFailed(false);
     setIsRetryInProgress(false);
-  }, [clearRetryTimer, clearSpinnerTimer]);
+  }, [clearRetryTimer]);
 
   // Each WebView load lands in a fresh JS context with no memory of prior
   // dispatches; re-emit native state that web listeners want at boot.
@@ -187,9 +173,9 @@ export default function App() {
   const handleManualRetry = useCallback(() => {
     trackEvent('webview_load_retry', { trigger: 'manual' });
     retryCountRef.current = 0;
-    scheduleSpinnerReveal();
+    setIsRetryInProgress(true);
     remountWebView();
-  }, [remountWebView, scheduleSpinnerReveal]);
+  }, [remountWebView]);
 
   const handleWebViewError = useCallback(
     (e: WebViewErrorEvent) => {
@@ -198,6 +184,7 @@ export default function App() {
       // onShouldStartLoadWithRequest returning false to hand off to the system
       // browser. Not a real load failure — ignore.
       if (code === -999) return;
+      hadLoadFailureRef.current = true;
       const attempt = retryCountRef.current;
       trackEvent('webview_load_failed', {
         code,
@@ -208,7 +195,7 @@ export default function App() {
       if (attempt < MAX_AUTO_RETRIES) {
         const delay = AUTO_RETRY_DELAYS_MS[attempt];
         retryCountRef.current = attempt + 1;
-        scheduleSpinnerReveal();
+        setIsRetryInProgress(true);
         clearRetryTimer();
         retryTimerRef.current = setTimeout(() => {
           retryTimerRef.current = null;
@@ -216,21 +203,19 @@ export default function App() {
           remountWebView();
         }, delay);
       } else {
-        clearSpinnerTimer();
         clearRetryTimer();
         setIsRetryInProgress(false);
         setLoadFailed(true);
       }
     },
-    [clearRetryTimer, clearSpinnerTimer, remountWebView, scheduleSpinnerReveal]
+    [clearRetryTimer, remountWebView]
   );
 
   useEffect(() => {
     return () => {
       clearRetryTimer();
-      clearSpinnerTimer();
     };
-  }, [clearRetryTimer, clearSpinnerTimer]);
+  }, [clearRetryTimer]);
 
   // Intercept wallet deep links (wc:, metamask:, etc.) and route non-app-bound
   // top-frame navigations to the system browser — WebKit's app-bound enforcement
