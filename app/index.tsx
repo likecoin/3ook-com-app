@@ -131,7 +131,7 @@ export default function App() {
   const handleNotificationDeepLink = useCallback(
     (rawURL: string) => {
       const target = resolveDeepLinkURL(rawURL);
-      if (!target) return;
+      if (!target || target === currentURLRef.current) return;
       trackEvent('launched_with_deep_link', { source: 'push_notification' });
       currentURLRef.current = target;
       if (hasLoadedRef.current) {
@@ -165,7 +165,19 @@ export default function App() {
   // Reload WebView when iOS kills its content process in the background.
   const handleContentProcessDidTerminate = useCallback(() => {
     trackEvent('webview_content_terminated');
+    // reload() also triggers onLoadStart → handleLoadStart, but that fires
+    // async: a tap landing between this call and onLoadStart would inject into
+    // the now-dead JS context. Gate synchronously here to close that window.
+    hasLoadedRef.current = false;
     webViewRef.current?.reload();
+  }, []);
+
+  // Any full document load (cold start, pull-to-refresh, reload()) starts in a
+  // pre-navigable state where injectJavaScript is dropped. Re-arm the gate so
+  // handleNotificationDeepLink parks until handleLoad flushes. SPA pushState
+  // navigations don't fire onLoadStart, so this stays paired with onLoad.
+  const handleLoadStart = useCallback(() => {
+    hasLoadedRef.current = false;
   }, []);
 
   const clearRetryTimer = useCallback(() => {
@@ -369,6 +381,7 @@ export default function App() {
             onShouldStartLoadWithRequest={handleNavigationRequest}
             onNavigationStateChange={handleNavigationStateChange}
             onMessage={handleMessage}
+            onLoadStart={handleLoadStart}
             onLoad={handleLoad}
             onLoadEnd={handleLoadEnd}
             onContentProcessDidTerminate={handleContentProcessDidTerminate}
