@@ -11,6 +11,9 @@ export function wrapIdentityHandlers(
   send: SendToWebView,
 ): BridgeHandlerMap;
 
-export function registerIntercomEventListeners(send: SendToWebView): () => void;
+export function registerIntercomEventListeners(
+  send: SendToWebView,
+  onDeepLink: (url: string) => void,
+): () => void;
 
 export function resyncPushStatusToWeb(send: SendToWebView): Promise<void>;

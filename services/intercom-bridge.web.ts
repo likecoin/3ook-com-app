@@ -19,7 +19,10 @@ export function wrapIdentityHandlers(
   return base;
 }
 
-export function registerIntercomEventListeners(_send: SendToWebView): () => void {
+export function registerIntercomEventListeners(
+  _send: SendToWebView,
+  _onDeepLink: (url: string) => void,
+): () => void {
   return () => {};
 }
 

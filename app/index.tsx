@@ -79,6 +79,11 @@ export default function App() {
   const retryCountRef = useRef(0);
   const hadLoadFailureRef = useRef(false);
   const retryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // A push-notification tap can resolve a deep link before the WebView's first
+  // load lands (cold start). injectJavaScript is a no-op pre-load, so park the
+  // URL and flush it from handleLoad once the page is navigable.
+  const hasLoadedRef = useRef(false);
+  const pendingDeepLinkRef = useRef<string | null>(null);
 
   useEffect(() => {
     (async () => {
@@ -114,6 +119,30 @@ export default function App() {
     );
   }, []);
 
+  const navigateWebView = useCallback((target: string) => {
+    webViewRef.current?.injectJavaScript(
+      `window.location.href = ${JSON.stringify(target)};true;`
+    );
+  }, []);
+
+  // Intercom push campaigns with a "URI on tap" deliver the destination via
+  // expo-notifications, not expo-linking, so they bypass the Linking listener
+  // above. Route them through the same navigation as warm deep links.
+  const handleNotificationDeepLink = useCallback(
+    (rawURL: string) => {
+      const target = resolveDeepLinkURL(rawURL);
+      if (!target || target === currentURLRef.current) return;
+      trackEvent('launched_with_deep_link', { source: 'push_notification' });
+      currentURLRef.current = target;
+      if (hasLoadedRef.current) {
+        navigateWebView(target);
+      } else {
+        pendingDeepLinkRef.current = target;
+      }
+    },
+    [navigateWebView]
+  );
+
   useEffect(() => {
     registerHandlers(getAudioHandlers());
     registerHandlers(getDownloadHandlers());
@@ -122,18 +151,33 @@ export default function App() {
 
     setupPlayer();
     const unsubscribeAudio = registerEventListeners(sendToWebView);
-    const unsubscribeIntercom = registerIntercomEventListeners(sendToWebView);
+    const unsubscribeIntercom = registerIntercomEventListeners(
+      sendToWebView,
+      handleNotificationDeepLink
+    );
     return () => {
       unsubscribeAudio();
       unsubscribeIntercom();
       clearHandlers();
     };
-  }, [sendToWebView]);
+  }, [sendToWebView, handleNotificationDeepLink]);
 
   // Reload WebView when iOS kills its content process in the background.
   const handleContentProcessDidTerminate = useCallback(() => {
     trackEvent('webview_content_terminated');
+    // reload() also triggers onLoadStart → handleLoadStart, but that fires
+    // async: a tap landing between this call and onLoadStart would inject into
+    // the now-dead JS context. Gate synchronously here to close that window.
+    hasLoadedRef.current = false;
     webViewRef.current?.reload();
+  }, []);
+
+  // Any full document load (cold start, pull-to-refresh, reload()) starts in a
+  // pre-navigable state where injectJavaScript is dropped. Re-arm the gate so
+  // handleNotificationDeepLink parks until handleLoad flushes. SPA pushState
+  // navigations don't fire onLoadStart, so this stays paired with onLoad.
+  const handleLoadStart = useCallback(() => {
+    hasLoadedRef.current = false;
   }, []);
 
   const clearRetryTimer = useCallback(() => {
@@ -154,7 +198,13 @@ export default function App() {
     clearRetryTimer();
     setLoadFailed(false);
     setIsRetryInProgress(false);
-  }, [clearRetryTimer]);
+    hasLoadedRef.current = true;
+    const pending = pendingDeepLinkRef.current;
+    if (pending) {
+      pendingDeepLinkRef.current = null;
+      navigateWebView(pending);
+    }
+  }, [clearRetryTimer, navigateWebView]);
 
   // Each WebView load lands in a fresh JS context with no memory of prior
   // dispatches; re-emit native state that web listeners want at boot.
@@ -167,6 +217,10 @@ export default function App() {
   const remountWebView = useCallback(() => {
     clearRetryTimer();
     setLoadFailed(false);
+    // Intentionally leave pendingDeepLinkRef set: a deep link parked during a
+    // failed cold start must survive the retry remount and flush on the
+    // eventual successful load, not be dropped.
+    hasLoadedRef.current = false;
     setWebViewKey((k) => k + 1);
   }, [clearRetryTimer]);
 
@@ -327,6 +381,7 @@ export default function App() {
             onShouldStartLoadWithRequest={handleNavigationRequest}
             onNavigationStateChange={handleNavigationStateChange}
             onMessage={handleMessage}
+            onLoadStart={handleLoadStart}
             onLoad={handleLoad}
             onLoadEnd={handleLoadEnd}
             onContentProcessDidTerminate={handleContentProcessDidTerminate}

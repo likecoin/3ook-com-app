@@ -212,23 +212,48 @@ function looksLikeIntercomPush(data: unknown): boolean {
   return 'conversation_id' in d || 'intercom_push_type' in d || 'instance_id' in d;
 }
 
+// Intercom push campaigns with an "open a deep link" / "URI on tap" action
+// carry the destination in the payload's `uri` key. Normally Intercom's native
+// SDK would open it through the OS, but expo-notifications consumes the tap
+// first (see handleIntercomNotificationTap), so we read the URL ourselves.
+// `deeplink`/`deep_link` are defensive fallbacks for payload-shape drift.
+function extractIntercomDeepLink(data: unknown): string | undefined {
+  if (!data || typeof data !== 'object') return undefined;
+  const d = data as Record<string, unknown>;
+  const uri = d.uri ?? d.deeplink ?? d.deep_link;
+  return typeof uri === 'string' && uri.length > 0 ? uri : undefined;
+}
+
 // Tapping a push notification launches the app via getInitialURL and the
 // expo-notifications response listener consumes the tap event before Intercom
 // ever sees it, so the messenger never auto-opens. Detect Intercom pushes
-// ourselves and present the messenger through the serialize queue so the
+// ourselves: a campaign with a deep link routes into the WebView; a
+// conversation push presents the messenger through the serialize queue so the
 // present call orders correctly against any in-flight identifyUser.
-function handleIntercomNotificationTap(data: unknown): void {
+function handleIntercomNotificationTap(
+  data: unknown,
+  onDeepLink: (url: string) => void,
+): void {
   const isIntercom = looksLikeIntercomPush(data);
   const intercomPushType =
     isIntercom && data && typeof data === 'object'
       ? (data as Record<string, unknown>).intercom_push_type
       : undefined;
+  const deepLink = isIntercom ? extractIntercomDeepLink(data) : undefined;
   trackEvent('push_notification_tapped', {
     is_intercom_push: isIntercom,
     intercom_push_type: typeof intercomPushType === 'string' ? intercomPushType : null,
+    has_deep_link: !!deepLink,
   });
   if (!loadedIntercom) return;
   if (!isIntercom) return;
+  // A deep-link campaign isn't a conversation — presenting the messenger here
+  // is the bug that strands the user on the last-visited URL. Hand the URL to
+  // the WebView navigator (which enforces the 3ook-host allowlist) instead.
+  if (deepLink) {
+    onDeepLink(deepLink);
+    return;
+  }
   const { Intercom } = loadedIntercom;
   serialize(async () => {
     await ensureSession();
@@ -443,7 +468,10 @@ export function wrapIdentityHandlers(
   };
 }
 
-export function registerIntercomEventListeners(send: SendToWebView): () => void {
+export function registerIntercomEventListeners(
+  send: SendToWebView,
+  onDeepLink: (url: string) => void,
+): () => void {
   if (!loadedIntercom) return () => {};
   const { events } = loadedIntercom;
 
@@ -503,7 +531,9 @@ export function registerIntercomEventListeners(send: SendToWebView): () => void 
   // expo-notifications buffers the most recent response until a JS listener
   // attaches, so registering here (from useEffect on mount) is early enough to
   // catch cold-launch taps as well as warm-app taps.
-  const unsubResponse = addNotificationResponseListener(handleIntercomNotificationTap);
+  const unsubResponse = addNotificationResponseListener((data) =>
+    handleIntercomNotificationTap(data, onDeepLink)
+  );
 
   // First sync is now driven by WebView onLoadEnd via resyncPushStatusToWeb,
   // which guarantees the web JS context exists to receive the dispatch.
