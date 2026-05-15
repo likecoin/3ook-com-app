@@ -90,7 +90,10 @@ export default function App() {
       const deepLink = await Linking.getInitialURL();
       const resolved = resolveDeepLinkURL(deepLink);
       if (resolved) {
-        trackEvent('launched_with_deep_link', { source: 'cold_start' });
+        trackEvent('launched_with_deep_link', {
+          source: 'cold_start',
+          disposition: 'webview',
+        });
       }
       const url = resolved ?? (await getInitialURL());
       currentURLRef.current = url;
@@ -102,7 +105,10 @@ export default function App() {
     const sub = Linking.addEventListener('url', ({ url }) => {
       const target = resolveDeepLinkURL(url);
       if (!target || target === currentURLRef.current) return;
-      trackEvent('launched_with_deep_link', { source: 'warm' });
+      trackEvent('launched_with_deep_link', {
+        source: 'warm',
+        disposition: 'webview',
+      });
       currentURLRef.current = target;
       webViewRef.current?.injectJavaScript(
         `window.location.href = ${JSON.stringify(target)};true;`
@@ -127,18 +133,59 @@ export default function App() {
 
   // Intercom push campaigns with a "URI on tap" deliver the destination via
   // expo-notifications, not expo-linking, so they bypass the Linking listener
-  // above. Route them through the same navigation as warm deep links.
+  // above. The payload is campaign-authored (server-controlled), so route it
+  // through the same trust tiers as in-WebView navigation: 3ook host → SPA,
+  // allowlisted deep links (custom schemes + known wallet universal links) →
+  // OS, other https:// → system browser. Anything else (http://, javascript:,
+  // data:, non-allowlisted custom schemes) is dropped, never opened.
   const handleNotificationDeepLink = useCallback(
     (rawURL: string) => {
       const target = resolveDeepLinkURL(rawURL);
-      if (!target || target === currentURLRef.current) return;
-      trackEvent('launched_with_deep_link', { source: 'push_notification' });
-      currentURLRef.current = target;
-      if (hasLoadedRef.current) {
-        navigateWebView(target);
-      } else {
-        pendingDeepLinkRef.current = target;
+      if (target) {
+        if (target === currentURLRef.current) return;
+        trackEvent('launched_with_deep_link', {
+          source: 'push_notification',
+          disposition: 'webview',
+        });
+        currentURLRef.current = target;
+        if (hasLoadedRef.current) {
+          navigateWebView(target);
+        } else {
+          pendingDeepLinkRef.current = target;
+        }
+        return;
       }
+      if (isDeepLink(rawURL)) {
+        trackEvent('launched_with_deep_link', {
+          source: 'push_notification',
+          disposition: 'os',
+        });
+        openDeepLink(rawURL).catch((e) =>
+          console.warn('[push deep link] failed to open:', e)
+        );
+        return;
+      }
+      try {
+        const { protocol } = new URL(rawURL);
+        // HTTPS only: a campaign has no reason to open plaintext http, and
+        // dropping it removes a downgrade/MITM vector on the external tier.
+        if (protocol === 'https:') {
+          trackEvent('launched_with_deep_link', {
+            source: 'push_notification',
+            disposition: 'external',
+          });
+          openExternalURL(rawURL).catch((e) =>
+            console.warn('[push external link] failed to open:', e)
+          );
+          return;
+        }
+      } catch {
+        // Unparseable URI — fall through to the rejection path.
+      }
+      trackEvent('launched_with_deep_link', {
+        source: 'push_notification',
+        disposition: 'rejected',
+      });
     },
     [navigateWebView]
   );
