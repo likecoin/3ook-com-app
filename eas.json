@@ -8,17 +8,17 @@
       "developmentClient": true,
       "distribution": "internal",
       "node": "24.10.0",
-      "cache": { "key": "rnfb24-firebase" }
+      "cache": { "key": "rnfb24-iap" }
     },
     "preview": {
       "distribution": "internal",
       "node": "24.10.0",
-      "cache": { "key": "rnfb24-firebase" }
+      "cache": { "key": "rnfb24-iap" }
     },
     "production": {
       "autoIncrement": true,
       "node": "24.10.0",
-      "cache": { "key": "rnfb24-firebase" }
+      "cache": { "key": "rnfb24-iap" }
     }
   },
   "submit": {
