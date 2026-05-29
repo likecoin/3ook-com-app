@@ -83,18 +83,21 @@ const escapeHtmlAttr = (s: string) =>
 const shouldBootstrapOffline = (online: boolean) =>
   Platform.OS === 'ios' && !online;
 
-// iOS-only offline priming. WKWebView won't run a registered service worker for
-// the FIRST top-level navigation on a cold offline launch, so a direct load of
-// the remote URL fails before the SW can serve its cache (WebKit bug 206741 and
-// related). Loading an inline document under the app's own origin (via baseUrl)
-// succeeds offline and wakes the SW; the redirect to the real URL is then
-// intercepted and served from the SW cache. Android serves offline via cacheMode
-// instead, so this path is gated to iOS at the call site.
+// iOS-only offline priming (WebKit bug 206741 and related). On a cold offline
+// launch WKWebView won't run a registered service worker for the first
+// top-level navigation, so a direct load fails before the SW can serve its
+// cache. The documented workaround (Apple DTS forum thread 702755): load an
+// inline document under a null origin (no baseUrl) that meta-refreshes to the
+// real URL — that redirect is a fresh top-level navigation WKWebView routes
+// through the now-started SW, which serves it from cache. Loading under the
+// real origin instead does NOT work: the string-loaded doc isn't SW-controlled
+// and the same-origin redirect bypasses the worker. Android serves offline via
+// cacheMode, so this is gated to iOS.
 //
-// The target is carried in an HTML-escaped data attribute and read by a static
-// script (never interpolated into the script body), and is accepted only if it's
-// an https 3ook.com URL — so a malformed or hostile URL can't break out of the
-// markup or redirect off-origin. Returns null when the target isn't usable.
+// No script runs: the URL sits in the meta refresh, HTML-attribute-escaped, and
+// is accepted only if it's an https 3ook.com URL — so a malformed or hostile
+// URL can't break out of the markup or redirect off-origin. Returns null when
+// the target isn't usable.
 const offlineBootstrapSource = (target: string) => {
   let url: URL;
   try {
@@ -106,11 +109,10 @@ const offlineBootstrapSource = (target: string) => {
     return null;
   }
   return {
-    baseUrl: url.origin,
     html:
-      '<!doctype html><meta charset="utf-8"><title>3ook.com</title>' +
-      `<body style="margin:0;background:#f9f9f9" data-target="${escapeHtmlAttr(url.href)}"></body>` +
-      '<script>location.replace(document.body.dataset.target)</script>',
+      '<!doctype html><meta charset="utf-8">' +
+      `<meta http-equiv="refresh" content="0; url=${escapeHtmlAttr(url.href)}">` +
+      '<body style="margin:0;background:#f9f9f9"></body>',
   };
 };
 
@@ -139,8 +141,11 @@ export default function App() {
   const isOnlineRef = useRef(true);
   // Whether this WebView mount should use the iOS offline priming bootstrap.
   // Set only at the two mount points (cold start, remount) so a mid-session
-  // connectivity blip can't reload a working page into the bootstrap.
+  // connectivity blip can't reload a working page into the bootstrap. Mirrored
+  // to a ref so handleWebViewError can tell whether the bootstrap was actually
+  // in play (vs. a misdetected-online cold start) without a stale closure.
   const [useOfflineBootstrap, setUseOfflineBootstrap] = useState(false);
+  const useOfflineBootstrapRef = useRef(false);
   const retryCountRef = useRef(0);
   const hadLoadFailureRef = useRef(false);
   const retryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -177,7 +182,9 @@ export default function App() {
       const online = await connectivity;
       isOnlineRef.current = online;
       setIsOnline(online);
-      setUseOfflineBootstrap(shouldBootstrapOffline(online));
+      const bootstrap = shouldBootstrapOffline(online);
+      useOfflineBootstrapRef.current = bootstrap;
+      setUseOfflineBootstrap(bootstrap);
       setInitialURL(url);
     })();
   }, []);
@@ -355,7 +362,9 @@ export default function App() {
     // failed cold start must survive the retry remount and flush on the
     // eventual successful load, not be dropped.
     hasLoadedRef.current = false;
-    setUseOfflineBootstrap(shouldBootstrapOffline(isOnlineRef.current));
+    const bootstrap = shouldBootstrapOffline(isOnlineRef.current);
+    useOfflineBootstrapRef.current = bootstrap;
+    setUseOfflineBootstrap(bootstrap);
     setWebViewKey((k) => k + 1);
   }, [clearRetryTimer]);
 
@@ -376,21 +385,30 @@ export default function App() {
       hadLoadFailureRef.current = true;
       const attempt = retryCountRef.current;
       const offline = !isOnlineRef.current;
+      const bootstrapped = useOfflineBootstrapRef.current;
       trackEvent('webview_load_failed', {
         code,
         domain: domain ?? null,
         description: description ?? null,
         retry_count: attempt,
         offline,
+        bootstrapped,
       });
       // Offline: remounting to the network just fails again, and on Android the
       // cached PWA shell was already attempted via cacheMode (LOAD_CACHE_ELSE_
-      // NETWORK) on this same load. So skip the auto-retry burst, surface the
-      // offline overlay immediately, and let the NetInfo listener auto-recover
-      // when the connection returns.
+      // NETWORK) on this same load.
       if (offline) {
         clearRetryTimer();
         retryCountRef.current = 0;
+        // iOS: if the priming bootstrap wasn't already in play — e.g. NetInfo
+        // misdetected connectivity at mount — engage it once and remount before
+        // giving up (remountWebView turns it on since isOnlineRef is offline
+        // now). If it was already tried, fall through to the overlay.
+        if (Platform.OS === 'ios' && !bootstrapped) {
+          setIsRetryInProgress(true);
+          remountWebView();
+          return;
+        }
         setIsRetryInProgress(false);
         setLoadFailed(true);
         return;
