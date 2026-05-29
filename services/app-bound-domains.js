@@ -14,4 +14,12 @@ function isAppBoundHost(host) {
   );
 }
 
-module.exports = { APP_BOUND_DOMAINS, isAppBoundHost };
+// Narrower than isAppBoundHost: only 3ook.com and its subdomains, never the
+// third-party app-bound domains. Use this where the 3ook origin specifically
+// matters (e.g. service-worker scope), not general app-bound navigation.
+function is3ookHost(host) {
+  const lowerHost = host.toLowerCase();
+  return lowerHost === '3ook.com' || lowerHost.endsWith('.3ook.com');
+}
+
+module.exports = { APP_BOUND_DOMAINS, isAppBoundHost, is3ookHost };

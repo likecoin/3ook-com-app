@@ -1,5 +1,7 @@
 import { File, Paths } from 'expo-file-system';
 
+import { is3ookHost } from './app-bound-domains';
+
 const storageFile = new File(Paths.document, 'last-url.json');
 const BASE_URL = 'https://3ook.com';
 const MAX_AGE_MS = 24 * 60 * 60 * 1000; // 24 hours
@@ -16,10 +18,7 @@ interface StoredURL {
 function is3ookURL(url: string): boolean {
   try {
     const parsed = new URL(url);
-    if (parsed.protocol !== 'https:') return false;
-    return (
-      parsed.hostname === '3ook.com' || parsed.hostname.endsWith('.3ook.com')
-    );
+    return parsed.protocol === 'https:' && is3ookHost(parsed.hostname);
   } catch {
     return false;
   }

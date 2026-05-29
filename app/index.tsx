@@ -1,7 +1,7 @@
 import NetInfo, { type NetInfoState } from '@react-native-community/netinfo';
 import * as Application from 'expo-application';
 import * as Linking from 'expo-linking';
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ActivityIndicator,
   BackHandler,
@@ -21,7 +21,7 @@ import type {
 
 import packageJson from '../package.json';
 import { trackEvent } from '../services/analytics';
-import { isAppBoundHost } from '../services/app-bound-domains';
+import { is3ookHost, isAppBoundHost } from '../services/app-bound-domains';
 import {
   getAudioHandlers,
   registerEventListeners,
@@ -73,6 +73,47 @@ const NATIVE_BRIDGE_BOOTSTRAP = `(function(){try{window.__nativeBridge=window.__
 // the WebView is never gated offline on an indeterminate signal.
 const isStateOnline = (state: NetInfoState) => state.isConnected !== false;
 
+const escapeHtmlAttr = (s: string) =>
+  s
+    .replace(/&/g, '&amp;')
+    .replace(/"/g, '&quot;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;');
+
+const shouldBootstrapOffline = (online: boolean) =>
+  Platform.OS === 'ios' && !online;
+
+// iOS-only offline priming. WKWebView won't run a registered service worker for
+// the FIRST top-level navigation on a cold offline launch, so a direct load of
+// the remote URL fails before the SW can serve its cache (WebKit bug 206741 and
+// related). Loading an inline document under the app's own origin (via baseUrl)
+// succeeds offline and wakes the SW; the redirect to the real URL is then
+// intercepted and served from the SW cache. Android serves offline via cacheMode
+// instead, so this path is gated to iOS at the call site.
+//
+// The target is carried in an HTML-escaped data attribute and read by a static
+// script (never interpolated into the script body), and is accepted only if it's
+// an https 3ook.com URL — so a malformed or hostile URL can't break out of the
+// markup or redirect off-origin. Returns null when the target isn't usable.
+const offlineBootstrapSource = (target: string) => {
+  let url: URL;
+  try {
+    url = new URL(target);
+  } catch {
+    return null;
+  }
+  if (url.protocol !== 'https:' || !is3ookHost(url.hostname)) {
+    return null;
+  }
+  return {
+    baseUrl: url.origin,
+    html:
+      '<!doctype html><meta charset="utf-8"><title>3ook.com</title>' +
+      `<body style="margin:0;background:#f9f9f9" data-target="${escapeHtmlAttr(url.href)}"></body>` +
+      '<script>location.replace(document.body.dataset.target)</script>',
+  };
+};
+
 // Cold-start loads of 3ook.com sometimes fail with transient network errors
 // (NSURLErrorDomain -1004 cannot-connect-to-host being the most common) before
 // the radio/VPN/captive portal has fully settled. Auto-retry by remounting the
@@ -96,6 +137,10 @@ export default function App() {
   // current value without re-subscribing.
   const [isOnline, setIsOnline] = useState(true);
   const isOnlineRef = useRef(true);
+  // Whether this WebView mount should use the iOS offline priming bootstrap.
+  // Set only at the two mount points (cold start, remount) so a mid-session
+  // connectivity blip can't reload a working page into the bootstrap.
+  const [useOfflineBootstrap, setUseOfflineBootstrap] = useState(false);
   const retryCountRef = useRef(0);
   const hadLoadFailureRef = useRef(false);
   const retryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -132,6 +177,7 @@ export default function App() {
       const online = await connectivity;
       isOnlineRef.current = online;
       setIsOnline(online);
+      setUseOfflineBootstrap(shouldBootstrapOffline(online));
       setInitialURL(url);
     })();
   }, []);
@@ -309,6 +355,7 @@ export default function App() {
     // failed cold start must survive the retry remount and flush on the
     // eventual successful load, not be dropped.
     hasLoadedRef.current = false;
+    setUseOfflineBootstrap(shouldBootstrapOffline(isOnlineRef.current));
     setWebViewKey((k) => k + 1);
   }, [clearRetryTimer]);
 
@@ -490,15 +537,27 @@ export default function App() {
     []
   );
 
+  // Both deps change only at (re)mount points, so the source keeps a stable
+  // object identity across other re-renders and the WebView never reloads
+  // spuriously. Fall back to a plain uri load if the bootstrap rejects the URL.
+  const webViewSource = useMemo(() => {
+    if (!initialURL) return null;
+    if (useOfflineBootstrap) {
+      const bootstrap = offlineBootstrapSource(initialURL);
+      if (bootstrap) return bootstrap;
+    }
+    return { uri: initialURL };
+  }, [initialURL, useOfflineBootstrap]);
+
   return (
     <>
       <View style={[styles.topSpacer, { height: insets.top }]} />
       <View style={styles.container}>
-        {initialURL && (
+        {webViewSource && (
           <WebView
             key={webViewKey}
             ref={webViewRef}
-            source={{ uri: initialURL }}
+            source={webViewSource}
             originWhitelist={['*']}
             style={styles.webview}
             userAgent={USER_AGENT}
