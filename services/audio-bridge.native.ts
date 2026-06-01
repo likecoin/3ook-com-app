@@ -63,6 +63,12 @@ let lastSentState = '';
 // Longer than web player's 5s because iOS uses blocking=1 URLs where the
 // server generates the full TTS audio before responding.
 const STUCK_TIMEOUT_MS = 15000;
+// How often each player emits playbackStatusUpdate (expo-audio default: 500ms).
+// With two persistent players that polling is a steady background CPU/battery
+// cost; 1000ms halves it. onStatus only needs coarse state transitions, and
+// gapless auto-advance rides the separate AVPlayerItem end notification
+// (didJustFinish), not this interval.
+const STATUS_UPDATE_INTERVAL_MS = 1000;
 let active = false;
 let stuckTimer: ReturnType<typeof setTimeout> | null = null;
 let stuckRetried = false;
@@ -145,10 +151,10 @@ function getOrCreatePlayers(): AudioPlayer {
   // producing audible gaps and clicks between segments. handleStop() must
   // explicitly call setIsAudioActiveAsync(false) to release the session.
   if (!playerA) {
-    playerA = createAudioPlayer(null, { keepAudioSessionActive: true });
+    playerA = createAudioPlayer(null, { keepAudioSessionActive: true, updateInterval: STATUS_UPDATE_INTERVAL_MS });
   }
   if (!playerB) {
-    playerB = createAudioPlayer(null, { keepAudioSessionActive: true });
+    playerB = createAudioPlayer(null, { keepAudioSessionActive: true, updateInterval: STATUS_UPDATE_INTERVAL_MS });
   }
   return getActivePlayer()!;
 }
