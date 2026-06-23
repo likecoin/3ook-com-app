@@ -22,6 +22,7 @@ import type {
 import packageJson from '../package.json';
 import { trackEvent } from '../services/analytics';
 import { isAppBoundHost } from '../services/app-bound-domains';
+import { isExternalBrowserHost } from '../services/external-hosts';
 import {
   getAudioHandlers,
   registerEventListeners,
@@ -433,7 +434,10 @@ export default function App() {
       try {
         const parsed = new URL(request.url);
         if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') return true;
-        if (isAppBoundHost(parsed.hostname)) return true;
+        // Browser-only 3ook subdomains (e.g. docs.3ook.com) would be kept in-app
+        // by isAppBoundHost and trap the user; let them fall through to external.
+        if (isAppBoundHost(parsed.hostname) && !isExternalBrowserHost(parsed.hostname))
+          return true;
         trackEvent('external_url_opened', { host: parsed.hostname });
         openExternalURL(request.url).catch((e) =>
           console.warn('[external link] failed to open:', request.url, e)

@@ -1,5 +1,7 @@
 import { File, Paths } from 'expo-file-system';
 
+import { isExternalBrowserHost } from './external-hosts';
+
 const storageFile = new File(Paths.document, 'last-url.json');
 const BASE_URL = 'https://3ook.com';
 const MAX_AGE_MS = 24 * 60 * 60 * 1000; // 24 hours
@@ -17,6 +19,10 @@ function is3ookURL(url: string): boolean {
   try {
     const parsed = new URL(url);
     if (parsed.protocol !== 'https:') return false;
+    // Never persist/restore browser-only subdomains (e.g. docs.3ook.com). This
+    // also recovers users already trapped on a saved docs URL: on relaunch the
+    // stored value fails here and getInitialURL falls back to the home page.
+    if (isExternalBrowserHost(parsed.hostname)) return false;
     return (
       parsed.hostname === '3ook.com' || parsed.hostname.endsWith('.3ook.com')
     );
