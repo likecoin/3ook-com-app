@@ -245,7 +245,7 @@ export default function App() {
   useEffect(() => {
     configureIAP();
     captureInstallAttribution().then((attr) => {
-      if (!attr || !Object.keys(attr.attribution).length) return;
+      if (!attr || (!Object.keys(attr.attribution).length && !attr.affiliateFrom)) return;
       installAttributionRef.current = attr;
       if (hasLoadedRef.current) injectInstallAttribution();
     });

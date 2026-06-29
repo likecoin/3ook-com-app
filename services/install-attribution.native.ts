@@ -24,10 +24,30 @@ const ATTRIBUTION_KEYS = [
 async function readStored(): Promise<InstallAttribution | null> {
   try {
     const data = JSON.parse(await markerFile.text());
-    if (data && typeof data.installedAt === 'number' && data.attribution && typeof data.attribution === 'object') {
+    if (
+      data
+      && typeof data.installedAt === 'number'
+      && data.attribution
+      && typeof data.attribution === 'object'
+      && !Array.isArray(data.attribution)
+    ) {
+      // Sanitize a possibly-corrupted marker: copy only known keys with non-empty
+      // string values (mirrors the capture path), so unexpected/dangerous keys
+      // (e.g. __proto__) or non-string types can't reach the bridge or consumers.
+      const attribution: Record<string, string> = {};
+      for (const key of ATTRIBUTION_KEYS) {
+        const value = data.attribution[key];
+        if (typeof value === 'string' && value.length > 0) attribution[key] = value;
+      }
       return {
-        attribution: data.attribution,
+        attribution,
         installedAt: data.installedAt,
+        // Guard the money-routing field too: never propagate a non-string or
+        // empty value into the bridge / backend `from` (matches capture).
+        affiliateFrom:
+          typeof data.affiliateFrom === 'string' && data.affiliateFrom.length > 0
+            ? data.affiliateFrom
+            : undefined,
       };
     }
   } catch {
@@ -64,7 +84,10 @@ export async function captureInstallAttribution(): Promise<InstallAttribution | 
   for (const key of ATTRIBUTION_KEYS) {
     if (parsed[key]) attribution[key] = parsed[key];
   }
-  const result: InstallAttribution = { attribution, installedAt: Date.now() };
+  // `from` is the affiliate/channel id (money-routing). Kept separate from the
+  // analytics `attribution` map so it never feeds the last-touch UTM fallback.
+  const affiliateFrom = parsed.from || undefined;
+  const result: InstallAttribution = { attribution, installedAt: Date.now(), affiliateFrom };
 
   // Persist (even when empty) so we don't re-query on later launches.
   try {
@@ -76,7 +99,9 @@ export async function captureInstallAttribution(): Promise<InstallAttribution | 
   if (Object.keys(attribution).length) {
     // Durable on the device so every later native event carries the source.
     registerSuperProperties(attribution);
-    trackEvent('install_referrer_captured', { ...attribution, referrer });
+    // Analytics-safe `attribution` only — never the raw referrer, which carries
+    // the money-routing `from`.
+    trackEvent('install_referrer_captured', attribution);
   }
   return result;
 }
