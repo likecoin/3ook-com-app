@@ -531,7 +531,14 @@ export function registerEventListeners(sendToWebView: SendToWebView) {
   });
   const interruptionEndedSub = addInterruptionEndedListener((_event) => {
     if (wasPlayingBeforeInterruption && active && !errored) {
-      getActivePlayer()?.play();
+      // iOS can leave the session deactivated after an interruption; a bare
+      // play() then throws "Session activation failed". Wait for any pending
+      // release (as doLoad does), re-assert the session, then resume.
+      Promise.resolve(sessionReleasePromise)
+        .then(() => setIsAudioActiveAsync(true))
+        // Re-check: the user may have paused or stopped during the await.
+        .then(() => { if (active && !errored) getActivePlayer()?.play(); })
+        .catch((e) => console.warn('Interruption resume failed:', e));
     }
     wasPlayingBeforeInterruption = false;
   });
