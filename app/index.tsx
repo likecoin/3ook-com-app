@@ -142,22 +142,6 @@ export default function App() {
     })();
   }, []);
 
-  useEffect(() => {
-    const sub = Linking.addEventListener('url', ({ url }) => {
-      const target = resolveDeepLinkURL(url);
-      if (!target || target === currentURLRef.current) return;
-      trackEvent('launched_with_deep_link', {
-        source: 'warm',
-        disposition: 'webview',
-      });
-      currentURLRef.current = target;
-      webViewRef.current?.injectJavaScript(
-        `window.location.href = ${JSON.stringify(target)};true;`
-      );
-    });
-    return () => sub.remove();
-  }, []);
-
   const sendToWebView = useCallback((data: object) => {
     const json = JSON.stringify(data);
     webViewRef.current?.injectJavaScript(
@@ -171,6 +155,31 @@ export default function App() {
       `window.location.href = ${JSON.stringify(target)};true;`
     );
   }, []);
+
+  // All in-WebView deep-link entries (warm Universal Links, push taps) go
+  // through here so they share the dedupe, tracking, and the parked-until-load
+  // gate — injectJavaScript into a pre-navigable WebView is silently dropped.
+  const routeToWebView = useCallback(
+    (target: string, source: string) => {
+      if (target === currentURLRef.current) return;
+      trackEvent('launched_with_deep_link', { source, disposition: 'webview' });
+      currentURLRef.current = target;
+      if (hasLoadedRef.current) {
+        navigateWebView(target);
+      } else {
+        pendingDeepLinkRef.current = target;
+      }
+    },
+    [navigateWebView]
+  );
+
+  useEffect(() => {
+    const sub = Linking.addEventListener('url', ({ url }) => {
+      const target = resolveDeepLinkURL(url);
+      if (target) routeToWebView(target, 'warm');
+    });
+    return () => sub.remove();
+  }, [routeToWebView]);
 
   // Each WebView load lands in a fresh JS context, so re-assert install
   // attribution on every load; the web reads it lazily at checkout time.
@@ -194,17 +203,7 @@ export default function App() {
     (rawURL: string) => {
       const target = resolveDeepLinkURL(rawURL);
       if (target) {
-        if (target === currentURLRef.current) return;
-        trackEvent('launched_with_deep_link', {
-          source: 'push_notification',
-          disposition: 'webview',
-        });
-        currentURLRef.current = target;
-        if (hasLoadedRef.current) {
-          navigateWebView(target);
-        } else {
-          pendingDeepLinkRef.current = target;
-        }
+        routeToWebView(target, 'push_notification');
         return;
       }
       if (isDeepLink(rawURL)) {
@@ -239,7 +238,7 @@ export default function App() {
         disposition: 'rejected',
       });
     },
-    [navigateWebView]
+    [routeToWebView]
   );
 
   useEffect(() => {
