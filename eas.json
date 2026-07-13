@@ -8,17 +8,17 @@
       "developmentClient": true,
       "distribution": "internal",
       "node": "24.10.0",
-      "cache": { "key": "no-precompiled-modules-1" }
+      "cache": { "key": "no-precompiled-modules-2" }
     },
     "preview": {
       "distribution": "internal",
       "node": "24.10.0",
-      "cache": { "key": "no-precompiled-modules-1" }
+      "cache": { "key": "no-precompiled-modules-2" }
     },
     "production": {
       "autoIncrement": true,
       "node": "24.10.0",
-      "cache": { "key": "no-precompiled-modules-1" }
+      "cache": { "key": "no-precompiled-modules-2" }
     }
   },
   "submit": {
