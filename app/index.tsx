@@ -40,6 +40,10 @@ import {
   resyncPushStatusToWeb,
   wrapIdentityHandlers,
 } from '../services/intercom-bridge';
+import {
+  getStoreReviewHandlers,
+  startStoreReviewWatcher,
+} from '../services/store-review';
 import { isDeepLink, openDeepLink, openExternalURL } from '../services/url-bridge';
 import { getInitialURL, resolveDeepLinkURL, saveLastURL } from '../services/url-storage';
 
@@ -62,6 +66,10 @@ const NATIVE_BRIDGE_FEATURES: readonly string[] = [
   ...(isIntercomPushSupported() ? ['intercomPush'] : []),
   // RevenueCat in-app purchases; only when a platform API key is configured.
   ...(isIAPAvailable() ? ['iap'] : []),
+  // Native App Store / Play rating prompt. Whether it actually appears is up to
+  // the store (engagement gate, per-version and yearly quotas), so web should
+  // treat requestStoreReview as a hint, never as a guaranteed dialog.
+  'storeReview',
 ];
 const NATIVE_BRIDGE_BOOTSTRAP = `(function(){try{window.__nativeBridge=window.__nativeBridge||{};window.__nativeBridge.features=${JSON.stringify(NATIVE_BRIDGE_FEATURES)};}catch(e){}})();true;`;
 
@@ -158,6 +166,7 @@ export default function App() {
     registerHandlers(getDownloadHandlers());
     registerHandlers(getIntercomHandlers(sendToWebView));
     registerHandlers(getIAPHandlers(sendToWebView));
+    registerHandlers(getStoreReviewHandlers());
     // identifyUser/resetUser fan out to analytics (base), RevenueCat logIn/Out
     // (IAP wrap), then Intercom (outer wrap) — one identity event, three sinks.
     registerHandlers(
@@ -170,9 +179,11 @@ export default function App() {
       sendToWebView,
       handleNotificationDeepLink
     );
+    const unsubscribeStoreReview = startStoreReviewWatcher();
     return () => {
       unsubscribeAudio();
       unsubscribeIntercom();
+      unsubscribeStoreReview();
       clearHandlers();
     };
   }, [sendToWebView, handleNotificationDeepLink, injectInstallAttribution, isLoaded]);
