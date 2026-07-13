@@ -106,7 +106,12 @@ export async function getFirebaseAppInstanceId(): Promise<string | null> {
 
 export async function resetIdentity(): Promise<void> {
   try {
-    posthog.reset();
+    // reset() mints a new anonymous id. Resetting while still anonymous strands
+    // the pre-login events (Application Installed, first opens) on a person no
+    // later identify() can merge, so only reset once we are actually identified.
+    if (posthog.getDistinctId() !== posthog.getAnonymousId()) {
+      posthog.reset();
+    }
   } catch (e) {
     console.warn('[analytics] posthog.reset failed', e);
   }
