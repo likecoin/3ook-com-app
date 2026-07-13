@@ -16,6 +16,7 @@ import {
 
 import { trackEvent } from './analytics';
 import type { SendToWebView, BridgeHandlerMap } from './bridge-dispatcher';
+import { armStoreReview, recordListening, setAudioActive } from './store-review';
 
 interface TrackInfo {
   index: number;
@@ -54,6 +55,14 @@ let queue: QueueTrack[] = [];
 let currentIndex = -1;
 let currentRate = 1;
 let lastFinishTime = 0;
+
+// Minimum listening within one load before finishing the queue counts as
+// "finished a book" for the review prompt. Rejects skipping to the last
+// segment, resuming near the end, and short samples.
+const MIN_SESSION_LISTENED_MS = 10 * 60 * 1000;
+const MAX_LISTEN_CHUNK_MS = 6 * 60 * 60 * 1000;
+let playingSince = 0;
+let sessionListenedMs = 0;
 let loadPromise: Promise<void> = Promise.resolve();
 let sessionReleasePromise: Promise<void> | null = null;
 let notifyWebView: SendToWebView | null = null;
@@ -214,6 +223,9 @@ function activatePlayer(p: AudioPlayer, track: QueueTrack): void {
 function playTrack(p: AudioPlayer, track: QueueTrack): void {
   resetRecoveryState();
 
+  // Writes lastSentState directly, so stand the listening clock down here too —
+  // otherwise the buffering gap before each segment counts as listening.
+  updateListening(false);
   lastSentState = 'buffering';
   notifyWebView?.({ type: 'playbackState', state: 'buffering' });
 
@@ -258,6 +270,27 @@ export function setupPlayer(): Promise<void> {
     });
   }
   return setupDone;
+}
+
+// Accrue wall-clock spent actually playing, for the store-review engagement
+// gate. Driven off the real player status rather than the `active` flag, since
+// a lock-screen pause goes straight to the native player without calling
+// handlePause(). Must be called from every lastSentState writer.
+function updateListening(isPlaying: boolean): void {
+  if (playingSince) {
+    const now = Date.now();
+    const elapsed = now - playingSince;
+    // A clock change or suspended timer, not listening. Dropped from both
+    // counters so the session and lifetime totals can't disagree.
+    if (elapsed > 0 && elapsed <= MAX_LISTEN_CHUNK_MS) {
+      sessionListenedMs += elapsed;
+      recordListening(elapsed);
+    }
+    playingSince = isPlaying ? now : 0;
+  } else if (isPlaying) {
+    playingSince = Date.now();
+  }
+  setAudioActive(isPlaying);
 }
 
 export function handleLoad(msg: LoadMessage): Promise<void> {
@@ -319,6 +352,10 @@ async function doLoad(msg: LoadMessage): Promise<void> {
   currentRate = msg.rate;
   lastFinishTime = 0;
   active = true;
+  // New book (or a voice-actor switch, which the web implements as stop → load):
+  // the "finished a book" threshold measures this load only.
+  updateListening(false);
+  sessionListenedMs = 0;
   clearStuckTimer();
   resetIdle();
 
@@ -357,6 +394,7 @@ export function handleStop(): void {
     trackEvent('audio_session_stopped', { last_index: currentIndex });
   }
   active = false;
+  updateListening(false);
   resetRecoveryState();
   clearStuckTimer();
   // Skip replace(null) — iOS expo-audio cannot cast null to AudioSource.
@@ -466,6 +504,10 @@ export function registerEventListeners(sendToWebView: SendToWebView) {
     if (status.playbackState === 'failed') {
       errored = true;
       clearStuckTimer();
+      // 'failed' is sticky and returns before the transition below, so the
+      // listening clock would otherwise run until the next load — crediting
+      // hours of silence and pinning audioActive true.
+      updateListening(false);
       trackEvent('audio_playback_failed', { current_index: currentIndex });
       notifyWebView?.({ type: 'error', message: 'Playback failed' });
       return;
@@ -481,6 +523,7 @@ export function registerEventListeners(sendToWebView: SendToWebView) {
       state = 'paused';
     }
     if (state !== lastSentState) {
+      updateListening(state === 'playing');
       lastSentState = state;
       notifyWebView?.({ type: 'playbackState', state });
     }
@@ -503,8 +546,14 @@ export function registerEventListeners(sendToWebView: SendToWebView) {
       lastFinishTime = now;
 
       if (currentIndex >= queue.length - 1) {
+        // Flush the final stretch and stand the clock down before arming: the
+        // review gate refuses to prompt while audio is playing.
+        updateListening(false);
         trackEvent('audio_queue_ended', { track_count: queue.length });
         notifyWebView?.({ type: 'queueEnded' });
+        // Usually fires with the screen locked, so this parks the prompt for the
+        // next foreground rather than showing it to nobody.
+        if (sessionListenedMs >= MIN_SESSION_LISTENED_MS) armStoreReview('book_finished');
       } else {
         // Auto-advance natively because WebView JS execution is suspended
         // when the app is backgrounded or the screen is locked, so it
@@ -566,6 +615,7 @@ export function registerEventListeners(sendToWebView: SendToWebView) {
     clearStuckTimer();
     resetIdle();
     active = false;
+    updateListening(false);
     resetRecoveryState();
     notifyWebView = null;
   };
