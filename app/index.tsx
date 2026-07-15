@@ -44,6 +44,11 @@ import {
   getStoreReviewHandlers,
   startStoreReviewWatcher,
 } from '../services/store-review';
+import { getWebViewCacheHandlers } from '../services/webview-cache-bridge';
+import {
+  clearWebViewCache,
+  isWebViewCacheClearSupported,
+} from '../modules/webview-cache';
 import { isDeepLink, openDeepLink, openExternalURL } from '../services/url-bridge';
 import { getInitialURL, resolveDeepLinkURL, saveLastURL } from '../services/url-storage';
 
@@ -70,6 +75,9 @@ const NATIVE_BRIDGE_FEATURES: readonly string[] = [
   // the store (engagement gate, per-version and yearly quotas), so web should
   // treat requestStoreReview as a hint, never as a guaranteed dialog.
   'storeReview',
+  // Native WKWebView cache clear; the web chunk-error plugin's last escalation
+  // rung. See modules/webview-cache.
+  ...(isWebViewCacheClearSupported() ? ['clearWebViewCache'] : []),
 ];
 const NATIVE_BRIDGE_BOOTSTRAP = `(function(){try{window.__nativeBridge=window.__nativeBridge||{};window.__nativeBridge.features=${JSON.stringify(NATIVE_BRIDGE_FEATURES)};}catch(e){}})();true;`;
 
@@ -155,6 +163,29 @@ export default function App() {
     );
   }, []);
 
+  // Last-resort recovery for the stale-chunk loop: iOS wipes the SW registration
+  // via the native module (which RNCWebView's clearCache can't); Android clears
+  // the WebView HTTP cache. markLoadStarted gates injection across the reload.
+  const clearWebViewCacheAndReload = useCallback(async () => {
+    markLoadStarted();
+    try {
+      if (Platform.OS === 'ios') {
+        await clearWebViewCache();
+      } else {
+        // clearCache isn't on react-native-webview's exported ref type but is
+        // implemented on both platforms' imperative handles.
+        (
+          webViewRef.current as unknown as {
+            clearCache?: (includeDiskFiles: boolean) => void;
+          } | null
+        )?.clearCache?.(true);
+      }
+    } catch (e) {
+      console.warn('[webview-cache] clear failed', e);
+    }
+    webViewRef.current?.reload();
+  }, [markLoadStarted]);
+
   useEffect(() => {
     configureIAP();
     captureInstallAttribution().then((attr) => {
@@ -167,6 +198,7 @@ export default function App() {
     registerHandlers(getIntercomHandlers(sendToWebView));
     registerHandlers(getIAPHandlers(sendToWebView));
     registerHandlers(getStoreReviewHandlers());
+    registerHandlers(getWebViewCacheHandlers(clearWebViewCacheAndReload));
     // identifyUser/resetUser fan out to analytics (base), RevenueCat logIn/Out
     // (IAP wrap), then Intercom (outer wrap) — one identity event, three sinks.
     registerHandlers(
@@ -186,7 +218,13 @@ export default function App() {
       unsubscribeStoreReview();
       clearHandlers();
     };
-  }, [sendToWebView, handleNotificationDeepLink, injectInstallAttribution, isLoaded]);
+  }, [
+    sendToWebView,
+    handleNotificationDeepLink,
+    injectInstallAttribution,
+    isLoaded,
+    clearWebViewCacheAndReload,
+  ]);
 
   // Reload WebView when iOS kills its content process in the background.
   const handleContentProcessDidTerminate = useCallback(() => {
