@@ -56,7 +56,7 @@ if (!revenueCatEnv.iosApiKey && !revenueCatEnv.androidApiKey) {
 }
 
 const config: ExpoConfig = {
-  name: '3ook.com',
+  name: '3ook.com 圖書館',
   owner: 'likerland',
   slug: '3ook-com-app',
   version: '1.2.7',
@@ -64,13 +64,20 @@ const config: ExpoConfig = {
   icon: './assets/images/icon.png',
   scheme: 'com.3ook',
   userInterfaceStyle: 'automatic',
+  // Base app name is Chinese; `locales` overrides the home-screen name to
+  // English on `en` devices. Expo localizes both iOS (CFBundleDisplayName)
+  // and Android (app_name) from the nested locale file.
+  locales: {
+    en: './locales/en.json',
+  },
   ios: {
     supportsTablet: true,
     bundleIdentifier: 'land.liker.book3app',
     googleServicesFile: './GoogleService-Info.plist',
     associatedDomains: ['applinks:3ook.com', 'webcredentials:3ook.com'],
     infoPlist: {
-      CFBundleDisplayName: '3ook Reader',
+      CFBundleDisplayName: '3ook.com 圖書館',
+      CFBundleAllowMixedLocalizations: true,
       ITSAppUsesNonExemptEncryption: false,
       IntercomUniversalLinkDomains: ['3ook.com'],
       NSMicrophoneUsageDescription:
