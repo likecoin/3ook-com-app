@@ -52,8 +52,10 @@ import {
 import { isDeepLink, openDeepLink, openExternalURL } from '../services/url-bridge';
 import { getInitialURL, resolveDeepLinkURL, saveLastURL } from '../services/url-storage';
 
-// e.g. 3ook-com-app/1.1.0 (iOS 18.0) Build/42
-const USER_AGENT = (() => {
+// Appended to (not replacing) the system WebView UA via applicationNameForUserAgent,
+// so the real Chromium version stays visible to the web app, server, and analytics.
+// The web app parses this token — keep its shape in sync with APP_USER_AGENT_REGEX.
+const APP_UA_SUFFIX = (() => {
   const appVersion = Application.nativeApplicationVersion ?? packageJson.version;
   const buildNumber = Application.nativeBuildVersion;
   const buildToken = buildNumber ? ` Build/${buildNumber}` : '';
@@ -353,7 +355,7 @@ export default function App() {
             source={{ uri: initialURL }}
             originWhitelist={['*']}
             style={styles.webview}
-            userAgent={USER_AGENT}
+            applicationNameForUserAgent={APP_UA_SUFFIX}
             sharedCookiesEnabled={true}
             mediaPlaybackRequiresUserAction={false}
             allowsInlineMediaPlayback={true}
