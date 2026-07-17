@@ -64,11 +64,13 @@ const config: ExpoConfig = {
   icon: './assets/images/icon.png',
   scheme: 'com.3ook',
   userInterfaceStyle: 'automatic',
-  // Base app name is Chinese; `locales` overrides the home-screen name to
-  // English on `en` devices. Expo localizes both iOS (CFBundleDisplayName)
-  // and Android (app_name) from the nested locale file.
+  // iOS picks the first preferred language with a matching .lproj, so Chinese
+  // needs its own locale file — otherwise a zh device with en in its list
+  // falls through to en.json instead of the Chinese base name.
   locales: {
     en: './locales/en.json',
+    'zh-Hant': './locales/zh-Hant.json',
+    'zh-Hans': './locales/zh-Hans.json',
   },
   ios: {
     supportsTablet: true,
