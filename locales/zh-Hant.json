@@ -1,0 +1,8 @@
+{
+  "ios": {
+    "CFBundleDisplayName": "3ook.com 圖書館"
+  },
+  "android": {
+    "app_name": "3ook.com 圖書館"
+  }
+}
