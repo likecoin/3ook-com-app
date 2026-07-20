@@ -56,7 +56,7 @@ if (!revenueCatEnv.iosApiKey && !revenueCatEnv.androidApiKey) {
 }
 
 const config: ExpoConfig = {
-  name: '3ook.com 圖書館',
+  name: '3ook.com',
   owner: 'likerland',
   slug: '3ook-com-app',
   version: '1.2.7',
@@ -78,7 +78,7 @@ const config: ExpoConfig = {
     googleServicesFile: './GoogleService-Info.plist',
     associatedDomains: ['applinks:3ook.com', 'webcredentials:3ook.com'],
     infoPlist: {
-      CFBundleDisplayName: '3ook.com 圖書館',
+      CFBundleDisplayName: '3ook.com',
       CFBundleAllowMixedLocalizations: true,
       ITSAppUsesNonExemptEncryption: false,
       IntercomUniversalLinkDomains: ['3ook.com'],
