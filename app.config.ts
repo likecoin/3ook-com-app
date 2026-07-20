@@ -56,7 +56,7 @@ if (!revenueCatEnv.iosApiKey && !revenueCatEnv.androidApiKey) {
 }
 
 const config: ExpoConfig = {
-  name: '3ook.com 圖書館',
+  name: '3ook.com',
   owner: 'likerland',
   slug: '3ook-com-app',
   version: '1.2.7',
