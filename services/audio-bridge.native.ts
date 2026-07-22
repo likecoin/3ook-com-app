@@ -1,3 +1,4 @@
+import NetInfo from '@react-native-community/netinfo';
 import CookieManager from '@preeternal/react-native-cookie-manager';
 import {
   createAudioPlayer,
@@ -51,6 +52,10 @@ interface QueueTrack {
 
 type PreloadState = 'hit' | 'miss' | 'fresh';
 
+// Whether a segment was already on disk. Reported on audio events so a cache
+// serving bad files shows up as a hit-skewed stall rate.
+type CacheState = 'hit' | 'miss';
+
 let playerA: AudioPlayer | null = null;
 let playerB: AudioPlayer | null = null;
 let activeSlot: 'A' | 'B' = 'A';
@@ -91,6 +96,28 @@ let active = false;
 let stuckTimer: ReturnType<typeof setTimeout> | null = null;
 let stuckRetried = false;
 let errored = false;
+
+// Connectivity at the moment an audio event fires. Offline replay is the whole
+// point of the segment cache, so every audio event carries it — otherwise there
+// is no way to tell a cache hit that saved a round trip from one that saved a
+// failure. NetInfo reports isConnected as boolean | null; treat unknown as
+// online, matching useWebViewRecovery.
+let isOnline = true;
+
+// Set when a track's source is handed to a player, consumed when that track
+// first reports playing. The gap is what the listener actually waits through,
+// which is the metric the cache exists to move — preload_state alone is binary
+// and cannot separate a 200ms miss from a 4s one.
+let pendingStart: {
+  index: number;
+  at: number;
+  preloadState: PreloadState;
+  cacheState: CacheState;
+} | null = null;
+
+function cacheStateFor(track: QueueTrack): CacheState {
+  return getCachedAudioUri(track.uri) ? 'hit' : 'miss';
+}
 
 type PlayerSource = { uri: string; headers?: Record<string, string> };
 
@@ -233,6 +260,13 @@ function armStuckTimer(): void {
     stuckRetried = true;
     const p = getActivePlayer();
     if (!p) return;
+    trackEvent('audio_stuck_retry', {
+      current_index: currentIndex,
+      // Whether the segment that froze was playing from disk. A cache that
+      // serves bad files would show up here as a hit-skewed stall rate.
+      cache_state: queue[currentIndex] ? cacheStateFor(queue[currentIndex]) : 'miss',
+      is_online: isOnline,
+    });
     // Player never buffered (silently-failed source, the common mid-queue
     // stuck case): re-issue the source to force a fresh fetch. If it IS
     // mid-buffer, the bare play() below avoids nuking a nearly-ready buffer.
@@ -253,6 +287,7 @@ function armStuckTimer(): void {
       if (lastSentState === 'playing' || !active || errored) return;
       console.warn('Audio stuck — retry failed');
       errored = true;
+      trackEvent('audio_stuck_failed', { current_index: currentIndex, is_online: isOnline });
       notifyWebView?.({ type: 'error', message: 'Playback stuck' });
     }, STUCK_TIMEOUT_MS);
   }, STUCK_TIMEOUT_MS);
@@ -423,7 +458,14 @@ async function doLoad(msg: LoadMessage): Promise<void> {
     track_count: queue.length,
     start_index: currentIndex,
     rate: currentRate,
+    is_online: isOnline,
   });
+  pendingStart = {
+    index: currentIndex,
+    at: Date.now(),
+    preloadState: 'fresh',
+    cacheState: cacheStateFor(queue[currentIndex]),
+  };
   playTrack(p, queue[currentIndex]);
 }
 
@@ -487,6 +529,10 @@ export function handleSkipTo(index: number, { resetFinishGuard = true } = {}): v
   const idle = getIdlePlayer();
   const idleHasThisTrack = preload.readyIndex === index || preload.loadingIndex === index;
   const preloadState: PreloadState = idleHasThisTrack && idle?.isLoaded ? 'hit' : 'miss';
+  // Read before the source is swapped in, so it reports whether the segment was
+  // already on disk when we advanced to it rather than after any later write.
+  const cacheState = cacheStateFor(queue[index]);
+  pendingStart = { index, at: Date.now(), preloadState, cacheState };
 
   if (preloadState === 'hit') {
     swapToIdle(queue[currentIndex]);
@@ -509,7 +555,8 @@ export function handleSkipTo(index: number, { resetFinishGuard = true } = {}): v
     preload_state: preloadState,
     auto_advance: !resetFinishGuard,
     // Whether this segment was already on disk when we advanced to it.
-    cache_state: getCachedAudioUri(queue[currentIndex].uri) ? 'hit' : 'miss',
+    cache_state: cacheState,
+    is_online: isOnline,
   });
   preloadNext();
 }
@@ -560,12 +607,18 @@ export function registerEventListeners(sendToWebView: SendToWebView) {
       // Evict any cached copy of the failing track — a corrupt file would
       // otherwise fail identically on every future replay of this segment.
       const failedTrack = queue[currentIndex];
+      // Read before evicting, or the eviction below makes every failure a miss.
+      const failedCacheState = failedTrack ? cacheStateFor(failedTrack) : 'miss';
       if (failedTrack) evictCachedAudio(failedTrack.uri);
       // 'failed' is sticky and returns before the transition below, so the
       // listening clock would otherwise run until the next load — crediting
       // hours of silence and pinning audioActive true.
       updateListening(false);
-      trackEvent('audio_playback_failed', { current_index: currentIndex });
+      trackEvent('audio_playback_failed', {
+        current_index: currentIndex,
+        cache_state: failedCacheState,
+        is_online: isOnline,
+      });
       notifyWebView?.({ type: 'error', message: 'Playback failed' });
       return;
     }
@@ -589,6 +642,20 @@ export function registerEventListeners(sendToWebView: SendToWebView) {
     if (state === 'playing') {
       errored = false;
       clearStuckTimer();
+      // Only fires for a track that was just started, so a resume from pause
+      // does not report a load. A segment that never reaches playing leaves its
+      // pendingStart to be overwritten — the missing event is the stall signal.
+      if (pendingStart && pendingStart.index === currentIndex) {
+        trackEvent('audio_track_playing', {
+          index: currentIndex,
+          load_ms: Date.now() - pendingStart.at,
+          preload_state: pendingStart.preloadState,
+          cache_state: pendingStart.cacheState,
+          stuck_retried: stuckRetried,
+          is_online: isOnline,
+        });
+        pendingStart = null;
+      }
     }
 
     // Trigger preload once playback starts
@@ -623,6 +690,19 @@ export function registerEventListeners(sendToWebView: SendToWebView) {
         handleSkipTo(currentIndex + 1, { resetFinishGuard: false });
       }
     }
+  }
+
+  // Connectivity for the is_online property on audio events. No seed fetch
+  // needed: NetInfo delivers the latest state to a new handler immediately.
+  // Guarded like useWebViewRecovery: addEventListener throws when the RNCNetInfo
+  // native module is missing, and that must not take the whole bridge down.
+  let netInfoSub: (() => void) | null = null;
+  try {
+    netInfoSub = NetInfo.addEventListener((netState) => {
+      isOnline = netState.isConnected !== false;
+    });
+  } catch {
+    // Native module absent — events carry the default rather than crashing.
   }
 
   const subA = playerA!.addListener('playbackStatusUpdate', (status) => onStatus(playerA!, status));
@@ -671,6 +751,7 @@ export function registerEventListeners(sendToWebView: SendToWebView) {
   return () => {
     subA.remove();
     subB.remove();
+    netInfoSub?.();
     interruptionBeganSub.remove();
     interruptionEndedSub.remove();
     appStateSub.remove();
