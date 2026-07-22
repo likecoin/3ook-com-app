@@ -15,6 +15,12 @@ import {
 } from '../modules/audio-interruption';
 
 import { trackEvent } from './analytics';
+import {
+  ensureCachedAudio,
+  evictCachedAudio,
+  getCachedAudioUri,
+  normalizeUrl,
+} from './audio-cache';
 import type { SendToWebView, BridgeHandlerMap } from './bridge-dispatcher';
 import { armStoreReview, recordListening, setAudioActive } from './store-review';
 
@@ -48,7 +54,10 @@ type PreloadState = 'hit' | 'miss' | 'fresh';
 let playerA: AudioPlayer | null = null;
 let playerB: AudioPlayer | null = null;
 let activeSlot: 'A' | 'B' = 'A';
-const preload = { readyIndex: -1, loadingIndex: -1, resetCount: 0 };
+// downloadingIndex covers the window before the idle player has the source.
+// Deliberately NOT read by handleSkipTo: the idle player still holds the
+// previous segment then, so counting it a preload hit would play wrong audio.
+const preload = { readyIndex: -1, loadingIndex: -1, downloadingIndex: -1, resetCount: 0 };
 let idleSub: { remove(): void } | null = null;
 
 let queue: QueueTrack[] = [];
@@ -83,16 +92,20 @@ let stuckTimer: ReturnType<typeof setTimeout> | null = null;
 let stuckRetried = false;
 let errored = false;
 
-// TODO: Remove this once the blocking param is no longer used in the web app.
-// This is to support streaming without breaking older versions of the app.
-function stripBlockingParam(url: string): string {
-  try {
-    const u = new URL(url);
-    u.searchParams.delete('blocking');
-    return u.toString();
-  } catch {
-    return url;
-  }
+type PlayerSource = { uri: string; headers?: Record<string, string> };
+
+function streamSource(track: QueueTrack): PlayerSource {
+  return { uri: track.uri, headers: track.headers };
+}
+
+// Play from disk when the segment is already cached, else stream. Read-only:
+// the cache is populated by preloadNext alone, never by a segment we are about
+// to play. Mirroring while streaming the same segment fetched it twice and put
+// the mirror in bandwidth contention with the playback it was mirroring.
+// Sync — the lookup is a filesystem stat, cheap enough for the playback path.
+function playbackSource(track: QueueTrack): PlayerSource {
+  const cachedUri = getCachedAudioUri(track.uri);
+  return cachedUri ? { uri: cachedUri } : streamSource(track);
 }
 
 function getActivePlayer(): AudioPlayer | null {
@@ -110,6 +123,7 @@ function swapSlots(): void {
 function resetIdle(): void {
   preload.readyIndex = -1;
   preload.loadingIndex = -1;
+  preload.downloadingIndex = -1;
   preload.resetCount += 1;
   idleSub?.remove();
   idleSub = null;
@@ -118,25 +132,56 @@ function resetIdle(): void {
 function preloadNext(): void {
   const nextIndex = currentIndex + 1;
   if (nextIndex >= queue.length) return;
-  if (preload.loadingIndex === nextIndex || preload.readyIndex === nextIndex) return;
+  if (
+    preload.loadingIndex === nextIndex ||
+    preload.readyIndex === nextIndex ||
+    preload.downloadingIndex === nextIndex
+  ) {
+    return;
+  }
 
   resetIdle();
 
   const idle = getIdlePlayer();
   if (!idle) return;
 
-  preload.loadingIndex = nextIndex;
   const track = queue[nextIndex];
   idle.pause();
-  idle.replace({ uri: track.uri, headers: track.headers });
+
+  const cachedUri = getCachedAudioUri(track.uri);
+  if (cachedUri) {
+    startIdleLoad(idle, { uri: cachedUri }, nextIndex);
+    return;
+  }
+
+  // Preload is the only path that populates the cache: download the segment,
+  // then hand the idle player the local file. The previous segment's playback
+  // is the runway, so waiting for a complete file costs nothing that streaming
+  // into the idle player would have saved; on failure we stream as before.
+  // resetCount is captured after resetIdle() so a later reset invalidates this
+  // continuation.
+  const startResetCount = preload.resetCount;
+  preload.downloadingIndex = nextIndex;
+  void ensureCachedAudio(track.uri, track.headers).then((localUri) => {
+    if (startResetCount !== preload.resetCount) return;
+    preload.downloadingIndex = -1;
+    // Re-read: the idle slot may have flipped since the download started.
+    const target = getIdlePlayer();
+    if (!target) return;
+    startIdleLoad(target, localUri ? { uri: localUri } : streamSource(track), nextIndex);
+  });
+}
+
+// After a swap the idle player still reports isLoaded from its old track.
+// Wait until we see a buffering/unloaded state (confirming the new source
+// started loading) before accepting isLoaded as the preload being ready.
+// resetCount guards against a late-firing status event racing resetIdle().
+function startIdleLoad(idle: AudioPlayer, source: PlayerSource, nextIndex: number): void {
+  const startResetCount = preload.resetCount;
+  preload.loadingIndex = nextIndex;
+  idle.replace(source);
   idle.setPlaybackRate(currentRate);
 
-  // After a swap the idle player still reports isLoaded from its old track.
-  // Wait until we see a buffering/unloaded state (confirming the new source
-  // started loading) before accepting isLoaded as the preload being ready.
-  // The resetCount guards against stale writes if resetIdle() races
-  // with a late-firing status event.
-  const startResetCount = preload.resetCount;
   let sawLoading = false;
   idleSub = idle.addListener('playbackStatusUpdate', (status) => {
     if (startResetCount !== preload.resetCount) return;
@@ -196,7 +241,10 @@ function armStuckTimer(): void {
       // Pause before replace so iOS doesn't schedule its own auto-resume
       // that races the play() below and mis-binds didJustFinish (see playTrack).
       p.pause();
-      p.replace({ uri: track.uri, headers: track.headers });
+      // Evict any cached copy (it may be corrupt) and stream directly, so the
+      // retry cannot replay the same local file that just froze.
+      evictCachedAudio(track.uri);
+      p.replace(streamSource(track));
       p.setPlaybackRate(currentRate);
     }
     p.play();
@@ -235,7 +283,7 @@ function playTrack(p: AudioPlayer, track: QueueTrack): void {
   // addPlaybackEndNotification can register on the wrong AVPlayerItem —
   // causing didJustFinish to never fire.
   p.pause();
-  p.replace({ uri: track.uri, headers: track.headers });
+  p.replace(playbackSource(track));
   activatePlayer(p, track);
   armStuckTimer();
 }
@@ -341,7 +389,10 @@ async function doLoad(msg: LoadMessage): Promise<void> {
   requestBatteryOptimizationExemption();
 
   queue = msg.tracks.map((t) => ({
-    uri: Platform.OS === 'android' ? stripBlockingParam(t.url) : t.url,
+    // Android streams the non-blocking variant; iOS keeps blocking=1. Older web
+    // builds still send blocking=1, so strip it here rather than relying on the
+    // web to stop.
+    uri: Platform.OS === 'android' ? normalizeUrl(t.url) : t.url,
     headers,
     title: t.title || msg.metadata.bookTitle,
     artist: msg.metadata.authorName,
@@ -457,6 +508,8 @@ export function handleSkipTo(index: number, { resetFinishGuard = true } = {}): v
     to_index: currentIndex,
     preload_state: preloadState,
     auto_advance: !resetFinishGuard,
+    // Whether this segment was already on disk when we advanced to it.
+    cache_state: getCachedAudioUri(queue[currentIndex].uri) ? 'hit' : 'miss',
   });
   preloadNext();
 }
@@ -504,6 +557,10 @@ export function registerEventListeners(sendToWebView: SendToWebView) {
     if (status.playbackState === 'failed') {
       errored = true;
       clearStuckTimer();
+      // Evict any cached copy of the failing track — a corrupt file would
+      // otherwise fail identically on every future replay of this segment.
+      const failedTrack = queue[currentIndex];
+      if (failedTrack) evictCachedAudio(failedTrack.uri);
       // 'failed' is sticky and returns before the transition below, so the
       // listening clock would otherwise run until the next load — crediting
       // hours of silence and pinning audioActive true.
@@ -535,7 +592,12 @@ export function registerEventListeners(sendToWebView: SendToWebView) {
     }
 
     // Trigger preload once playback starts
-    if (state === 'playing' && preload.readyIndex < 0 && preload.loadingIndex < 0) {
+    if (
+      state === 'playing' &&
+      preload.readyIndex < 0 &&
+      preload.loadingIndex < 0 &&
+      preload.downloadingIndex < 0
+    ) {
       preloadNext();
     }
 

@@ -1,6 +1,7 @@
 import * as Sentry from '@sentry/react-native';
 
 import { identify, resetIdentity } from './analytics';
+import { clearAudioCache } from './audio-cache';
 import type { BridgeHandlerMap } from './bridge-dispatcher';
 
 export function getIdentityHandlers(): BridgeHandlerMap {
@@ -40,6 +41,9 @@ export function getIdentityHandlers(): BridgeHandlerMap {
     },
 
     resetUser: async () => {
+      // Drop cached TTS audio so it can't replay under a different account on a
+      // shared device.
+      clearAudioCache();
       await resetIdentity();
       Sentry.setUser(null);
     },

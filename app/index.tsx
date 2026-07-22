@@ -21,6 +21,7 @@ import {
   registerEventListeners,
   setupPlayer,
 } from '../services/audio-bridge';
+import { initAudioCache } from '../services/audio-cache';
 import { clearHandlers, dispatch, registerHandlers } from '../services/bridge-dispatcher';
 import { getDownloadHandlers } from '../services/download-bridge';
 import { getIdentityHandlers } from '../services/identity-bridge';
@@ -208,6 +209,9 @@ export default function App() {
     );
 
     setupPlayer();
+    // Trims the TTS segment cache to its byte budget once per launch, so
+    // playback never pays for cache maintenance.
+    initAudioCache();
     const unsubscribeAudio = registerEventListeners(sendToWebView);
     const unsubscribeIntercom = registerIntercomEventListeners(
       sendToWebView,

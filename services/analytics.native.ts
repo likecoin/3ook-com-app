@@ -92,6 +92,30 @@ export async function identify(
   await Promise.all(tasks);
 }
 
+// Watch a boolean feature flag. PostHog persists the last flags response, so on
+// any launch after the first the seed read already has the real value; on a
+// cold install it is undefined until the network response lands.
+export function watchFeatureFlag(
+  key: string,
+  onChange: (enabled: boolean | undefined) => void,
+): void {
+  // Subscribe before seeding: if the seed read throws, the caller must still
+  // get later updates, or a kill-switch would be dead for the whole process.
+  // Re-read inside the callback rather than using its argument — onFeatureFlag
+  // reports the raw flag (string for multivariate), isFeatureEnabled coerces.
+  try {
+    posthog.onFeatureFlag(key, () => onChange(posthog.isFeatureEnabled(key)));
+  } catch (e) {
+    console.warn('[analytics] watchFeatureFlag subscribe failed', e);
+  }
+  try {
+    // onFeatureFlag only fires on a reload, never with the current value.
+    onChange(posthog.isFeatureEnabled(key));
+  } catch (e) {
+    console.warn('[analytics] watchFeatureFlag seed failed', e);
+  }
+}
+
 // Firebase App Instance ID. Exposed so the IAP bridge can mirror it onto
 // RevenueCat's reserved $firebaseAppInstanceId attribute, keeping the firebase
 // SDK dep contained in this module.
