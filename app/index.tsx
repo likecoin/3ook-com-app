@@ -209,8 +209,6 @@ export default function App() {
     );
 
     setupPlayer();
-    // Trims the TTS segment cache to its byte budget once per launch, so
-    // playback never pays for cache maintenance.
     initAudioCache();
     const unsubscribeAudio = registerEventListeners(sendToWebView);
     const unsubscribeIntercom = registerIntercomEventListeners(

@@ -1,14 +1,20 @@
 import { Directory, File, Paths } from 'expo-file-system';
 
-import { watchFeatureFlag } from './analytics';
+import { trackEvent, watchFeatureFlag } from './analytics';
 
 // Local disk cache for TTS segment audio. Every segment the player fetches is
 // mirrored to disk keyed by a hash of its URL, so already-played segments
 // replay without a network round trip (offline resilience), bounded by a byte
 // budget and evicted oldest-written-first so it can't grow without limit.
 
-// Kill-switches for the whole cache-as-played path — when off, the player
-// streams every segment as before, without touching disk.
+// Why a cached segment never reached disk. Anything the download itself throws
+// is a transport error; the rest are rejections by validationFailure.
+type CacheFailureReason = 'too_small' | 'not_audio' | 'download_failed';
+
+type CacheEntry = { file: File; size: number; modifiedAt: number };
+
+// Kill-switches for the cache-as-played path — when off, the player streams
+// every segment as before, never reading or writing cached segment files.
 // CACHE_ENABLED is the build-time override (covers a fault that lands before
 // flags can load); the PostHog flag disables the cache in the field without a
 // release. An unresolved flag leaves the cache on, matching the shipped
@@ -67,18 +73,24 @@ function cyrb53(str: string, seed = 0): number {
   return 4294967296 * (2097151 & h2) + (h1 >>> 0);
 }
 
+// Rewrite one query param, passing the URL through untouched if it won't parse.
+function withParam(url: string, key: string, value: string | null): string {
+  try {
+    const u = new URL(url);
+    if (value === null) u.searchParams.delete(key);
+    else u.searchParams.set(key, value);
+    return u.toString();
+  } catch {
+    return url;
+  }
+}
+
 // Cache-key normalizer, not a request URL. The blocking param varies by
 // platform (iOS plays blocking=1, Android strips it) but does not change the
 // audio bytes, so drop it before hashing and both platforms converge on one
 // entry. Shared with the player, which also uses it as the Android play URI.
 export function normalizeUrl(url: string): string {
-  try {
-    const u = new URL(url);
-    u.searchParams.delete('blocking');
-    return u.toString();
-  } catch {
-    return url;
-  }
+  return withParam(url, 'blocking', null);
 }
 
 // Request URL for cache downloads, always the blocking variant. The server
@@ -88,13 +100,7 @@ export function normalizeUrl(url: string): string {
 // server's own cached object when a client disconnects, so an abandoned mirror
 // download would force a full TTS regeneration for the next listener.
 function withBlocking(url: string): string {
-  try {
-    const u = new URL(url);
-    u.searchParams.set('blocking', '1');
-    return u.toString();
-  } catch {
-    return url;
-  }
+  return withParam(url, 'blocking', '1');
 }
 
 function keyFor(url: string): string {
@@ -138,15 +144,17 @@ const MIN_SEGMENT_BYTES = 1024;
 
 // Reject non-audio response bodies (e.g. a login page reached via redirect
 // after Cloudflare Access session expiry) before they enter the cache.
-// Accepts an ID3 tag or an MPEG frame sync in the first bytes.
-function looksLikeMpegAudio(file: File): boolean {
-  if (file.size < MIN_SEGMENT_BYTES) return false;
+// Accepts an ID3 tag or an MPEG frame sync in the first bytes. Returns the
+// reason for a rejection so it can be reported, or null when the file passes.
+function validationFailure(file: File): Exclude<CacheFailureReason, 'download_failed'> | null {
+  if (file.size < MIN_SEGMENT_BYTES) return 'too_small';
   const handle = file.open();
   try {
     const bytes = handle.readBytes(3);
-    if (bytes.length < 3) return false;
-    if (bytes[0] === 0x49 && bytes[1] === 0x44 && bytes[2] === 0x33) return true; // 'ID3'
-    return bytes[0] === 0xff && (bytes[1] & 0xe0) === 0xe0;
+    if (bytes.length < 3) return 'too_small';
+    if (bytes[0] === 0x49 && bytes[1] === 0x44 && bytes[2] === 0x33) return null; // 'ID3'
+    const isFrameSync = bytes[0] === 0xff && (bytes[1] & 0xe0) === 0xe0;
+    return isFrameSync ? null : 'not_audio';
   } finally {
     handle.close();
   }
@@ -187,18 +195,18 @@ export function ensureCachedAudio(
     ...(headers ? { headers } : {}),
   })
     .then(() => {
-      // Cache was cleared (logout) while downloading — discard the result.
-      if (gen !== cacheGeneration) throw new Error('cache cleared');
-      // Evicted mid-download (playback failed on these very bytes).
-      if (evicted.delete(key)) throw new Error('evicted');
-      if (!looksLikeMpegAudio(part)) throw new Error('not audio');
+      // Cleared (logout) or evicted (playback failed on these very bytes) while
+      // downloading. Deliberate discards, so they are dropped without reporting.
+      if (gen !== cacheGeneration || evicted.delete(key)) {
+        tryDelete(part);
+        return null;
+      }
+      const failure = validationFailure(part);
+      if (failure) return reportFailure(part, failure);
       part.move(file);
       return file.uri;
     })
-    .catch(() => {
-      tryDelete(part);
-      return null;
-    })
+    .catch(() => reportFailure(part, 'download_failed'))
     .finally(() => {
       evicted.delete(key);
       // After a clear this key belongs to post-clear downloads; only the
@@ -208,6 +216,15 @@ export function ensureCachedAudio(
 
   inFlight.set(key, download);
   return download;
+}
+
+// Drop the partial download and report why it never reached disk. Without this
+// a cache that never populates and one that populates without helping are the
+// same empty result in the data.
+function reportFailure(part: File, reason: CacheFailureReason): null {
+  tryDelete(part);
+  trackEvent('audio_cache_failed', { reason });
+  return null;
 }
 
 // Best-effort delete; returns false when the file survives.
@@ -221,7 +238,8 @@ function tryDelete(file: File): boolean {
 }
 
 // Drop one cached segment, e.g. after it failed to play, so the next attempt
-// streams fresh bytes instead of retrying a corrupt file.
+// streams fresh bytes instead of retrying a corrupt file. Deliberately not
+// flag-gated: a corrupt entry must not survive a kill-switch off/on cycle.
 export function evictCachedAudio(url: string): void {
   const key = keyFor(url);
   // A download already in flight would republish the same (possibly corrupt)
@@ -234,9 +252,8 @@ export function evictCachedAudio(url: string): void {
   }
 }
 
-// Cache files with a known size, for the launch-time sweep.
-function sizedEntries(): { file: File; size: number; modifiedAt: number }[] {
-  const entries: { file: File; size: number; modifiedAt: number }[] = [];
+function sizedEntries(): CacheEntry[] {
+  const entries: CacheEntry[] = [];
   for (const entry of cacheDir().list()) {
     if (!(entry instanceof File)) continue;
     const info = entry.info();
@@ -245,6 +262,8 @@ function sizedEntries(): { file: File; size: number; modifiedAt: number }[] {
   }
   return entries;
 }
+
+const SWEEP_DELAY_MS = 5000;
 
 let sweepScheduled = false;
 
@@ -256,10 +275,17 @@ let sweepScheduled = false;
 export function initAudioCache(): void {
   if (sweepScheduled) return;
   sweepScheduled = true;
-  // Deferred so a cold start's first frame never waits on the filesystem.
+  // Delayed rather than next-tick: the sweep stats every cached file
+  // synchronously and cannot yield once started, so a setTimeout(0) would run
+  // it inside startup. Long enough to clear the launch and the first render.
   setTimeout(() => {
     try {
-      const entries: { file: File; size: number; modifiedAt: number }[] = [];
+      // Don't create the cache directory just to sweep it — a device that has
+      // never cached (or has the kill-switch off) has nothing to reclaim.
+      const dir = cacheDirInstance ?? new Directory(Paths.cache, CACHE_DIR_NAME);
+      if (!dir.exists) return;
+
+      const entries: CacheEntry[] = [];
       let total = 0;
       for (const entry of sizedEntries()) {
         if (entry.file.name.endsWith('.part')) {
@@ -274,17 +300,13 @@ export function initAudioCache(): void {
       entries.sort((a, b) => a.modifiedAt - b.modifiedAt);
       for (const entry of entries) {
         if (total <= MAX_CACHE_BYTES) break;
-        try {
-          entry.file.delete();
-          total -= entry.size;
-        } catch {
-          // Skip a file we can't delete; the next launch retries it.
-        }
+        // Skips a file we can't delete; the next launch retries it.
+        if (tryDelete(entry.file)) total -= entry.size;
       }
     } catch {
       // Never let cache maintenance break startup.
     }
-  }, 0);
+  }, SWEEP_DELAY_MS);
 }
 
 export function clearAudioCache(): void {
