@@ -23,4 +23,12 @@ export function identify(
 
 export function resetIdentity(): Promise<void>;
 
+// Watch a boolean feature flag. `onChange` fires once with the value known at
+// call time, then again on every flags reload. `undefined` means "not loaded
+// yet" — callers pick their own default for it.
+export function watchFeatureFlag(
+  key: string,
+  onChange: (enabled: boolean | undefined) => void,
+): void;
+
 export function getFirebaseAppInstanceId(): Promise<string | null>;

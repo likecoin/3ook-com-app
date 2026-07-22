@@ -11,6 +11,11 @@ export async function identify(
 
 export async function resetIdentity(): Promise<void> {}
 
+export function watchFeatureFlag(
+  _key: string,
+  _onChange: (enabled: boolean | undefined) => void,
+): void {}
+
 export async function getFirebaseAppInstanceId(): Promise<string | null> {
   return null;
 }
