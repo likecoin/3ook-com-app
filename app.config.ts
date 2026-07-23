@@ -59,7 +59,7 @@ const config: ExpoConfig = {
   name: '3ook.com 圖書館',
   owner: 'likerland',
   slug: '3ook-com-app',
-  version: '1.2.7',
+  version: '1.2.8',
   orientation: 'portrait',
   icon: './assets/images/icon.png',
   scheme: 'com.3ook',
