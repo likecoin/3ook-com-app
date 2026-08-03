@@ -3,6 +3,7 @@ import { useCallback, useEffect, useRef } from 'react';
 import type { RefObject } from 'react';
 
 import { trackEvent } from '../services/analytics';
+import { isBookstoreURL } from '../services/external-hosts';
 import { isDeepLink, openDeepLink, openExternalURL } from '../services/url-bridge';
 import { resolveDeepLinkURL } from '../services/url-storage';
 
@@ -45,7 +46,19 @@ export function useDeepLinkRouting({
   useEffect(() => {
     const sub = Linking.addEventListener('url', ({ url }) => {
       const target = resolveDeepLinkURL(url);
-      if (target) routeToWebView(target, 'warm');
+      if (target) {
+        routeToWebView(target, 'warm');
+        return;
+      }
+      if (isBookstoreURL(url)) {
+        trackEvent('launched_with_deep_link', {
+          source: 'warm',
+          disposition: 'external',
+        });
+        openExternalURL(url).catch((e) =>
+          console.warn('[warm external link] failed to open:', e)
+        );
+      }
     });
     return () => sub.remove();
   }, [routeToWebView]);

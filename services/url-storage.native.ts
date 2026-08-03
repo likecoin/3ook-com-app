@@ -1,6 +1,6 @@
 import { File, Paths } from 'expo-file-system';
 
-import { isExternalBrowserHost } from './external-hosts';
+import { isBookstorePath, isExternalBrowserHost } from './external-hosts';
 
 const storageFile = new File(Paths.document, 'last-url.json');
 const BASE_URL = 'https://3ook.com';
@@ -23,6 +23,7 @@ function is3ookURL(url: string): boolean {
     // also recovers users already trapped on a saved docs URL: on relaunch the
     // stored value fails here and getInitialURL falls back to the home page.
     if (isExternalBrowserHost(parsed.hostname)) return false;
+    if (isBookstorePath(parsed.pathname)) return false;
     return (
       parsed.hostname === '3ook.com' || parsed.hostname.endsWith('.3ook.com')
     );

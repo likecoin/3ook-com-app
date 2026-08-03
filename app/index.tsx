@@ -15,7 +15,7 @@ import { useDeepLinkRouting } from '../hooks/useDeepLinkRouting';
 import { useWebViewRecovery } from '../hooks/useWebViewRecovery';
 import { trackEvent } from '../services/analytics';
 import { isAppBoundHost } from '../services/app-bound-domains';
-import { isExternalBrowserHost } from '../services/external-hosts';
+import { isBookstoreURL, isExternalBrowserHost } from '../services/external-hosts';
 import {
   getAudioHandlers,
   registerEventListeners,
@@ -150,6 +150,14 @@ export default function App() {
           source: 'cold_start',
           disposition: 'webview',
         });
+      } else if (deepLink && isBookstoreURL(deepLink)) {
+        trackEvent('launched_with_deep_link', {
+          source: 'cold_start',
+          disposition: 'external',
+        });
+        openExternalURL(deepLink).catch((e) =>
+          console.warn('[cold start external link] failed to open:', e)
+        );
       }
       const url = resolved ?? (await getInitialURL());
       currentURLRef.current = url;
@@ -291,9 +299,13 @@ export default function App() {
       try {
         const parsed = new URL(request.url);
         if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') return true;
-        // Browser-only 3ook subdomains (e.g. docs.3ook.com) would be kept in-app
-        // by isAppBoundHost and trap the user; let them fall through to external.
-        if (isAppBoundHost(parsed.hostname) && !isExternalBrowserHost(parsed.hostname))
+        // Browser-only destinations would be kept in-app by isAppBoundHost;
+        // let them open externally.
+        if (
+          isAppBoundHost(parsed.hostname) &&
+          !isExternalBrowserHost(parsed.hostname) &&
+          !isBookstoreURL(request.url)
+        )
           return true;
         trackEvent('external_url_opened', { host: parsed.hostname });
         openExternalURL(request.url).catch((e) =>
