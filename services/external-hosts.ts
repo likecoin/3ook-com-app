@@ -10,3 +10,21 @@ export function isExternalBrowserHost(host: string): boolean {
   const lowerHost = host.toLowerCase();
   return EXTERNAL_BROWSER_HOSTS.includes(lowerHost);
 }
+
+const BOOKSTORE_PATH_REGEX = /^\/(?:[a-z]{2}(?:-[A-Za-z]{2,4})?\/)?store(?:\/|$)/i;
+
+export function isBookstorePath(pathname: string): boolean {
+  return BOOKSTORE_PATH_REGEX.test(pathname);
+}
+
+export function isBookstoreURL(url: string): boolean {
+  try {
+    const parsed = new URL(url);
+    if (parsed.protocol !== 'https:') return false;
+    const host = parsed.hostname.toLowerCase();
+    if (host !== '3ook.com' && !host.endsWith('.3ook.com')) return false;
+    return isBookstorePath(parsed.pathname);
+  } catch {
+    return false;
+  }
+}
