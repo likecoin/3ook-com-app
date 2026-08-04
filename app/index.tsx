@@ -411,6 +411,10 @@ export default function App() {
           onRetry={handleManualRetry}
         />
       </View>
+      {/* Android WebView returns CSS env(safe-area-inset-bottom) as 0 */}
+      {Platform.OS === 'android' && (
+        <View style={[styles.bottomSpacer, { height: insets.bottom }]} />
+      )}
     </>
   );
 }
@@ -419,9 +423,12 @@ const styles = StyleSheet.create({
   topSpacer: {
     backgroundColor: '#131313',
   },
+  bottomSpacer: {
+    backgroundColor: '#f9f9f9',
+  },
   container: {
     flex: 1,
-    backgroundColor: '#ffffff',
+    backgroundColor: '#f9f9f9',
   },
   webview: {
     flex: 1,
