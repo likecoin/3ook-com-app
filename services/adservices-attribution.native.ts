@@ -114,7 +114,9 @@ async function readMarker(): Promise<AdServicesMarker | null> {
       version: 1,
       status,
       installedAt,
-      attempts: Number(raw.attempts) || 0,
+      // Validated like the fields above: the budget guard is a `>=`, so a
+      // negative or fractional value would quietly loosen it.
+      attempts: Math.max(0, Math.trunc(Number(raw.attempts) || 0)),
       attribution: attributed ? sanitizeAttribution(raw.attribution) : undefined,
       apple: attributed ? pickStringKeys(raw.apple, APPLE_ADS_KEYS) : undefined,
       delivered: raw.delivered === true,
