@@ -2,24 +2,14 @@ import * as Application from 'expo-application';
 import { File, Paths } from 'expo-file-system';
 import { Platform } from 'react-native';
 
+import { captureAdServicesAttribution } from './adservices-attribution';
 import { registerSuperProperties, trackEvent } from './analytics';
+import { sanitizeAttribution } from './attribution-keys';
 import type { InstallAttribution } from './install-attribution';
 
 // The Play Install Referrer is one-shot per install, so capture it once and
 // persist the parsed result to avoid re-querying on every launch.
 const markerFile = new File(Paths.document, 'install-referrer.json');
-
-// Acquisition signals the web/backend consume; click ids ride alongside UTM.
-const ATTRIBUTION_KEYS = [
-  'utm_source',
-  'utm_medium',
-  'utm_campaign',
-  'utm_content',
-  'utm_term',
-  'gclid',
-  'fbclid',
-  'gad_source',
-] as const;
 
 async function readStored(): Promise<InstallAttribution | null> {
   try {
@@ -31,14 +21,9 @@ async function readStored(): Promise<InstallAttribution | null> {
       && typeof data.attribution === 'object'
       && !Array.isArray(data.attribution)
     ) {
-      // Sanitize a possibly-corrupted marker: copy only known keys with non-empty
-      // string values (mirrors the capture path), so unexpected/dangerous keys
-      // (e.g. __proto__) or non-string types can't reach the bridge or consumers.
-      const attribution: Record<string, string> = {};
-      for (const key of ATTRIBUTION_KEYS) {
-        const value = data.attribution[key];
-        if (typeof value === 'string' && value.length > 0) attribution[key] = value;
-      }
+      // Sanitize a possibly-corrupted marker (mirrors the capture path), so
+      // unexpected/dangerous keys or non-string types can't reach consumers.
+      const attribution = sanitizeAttribution(data.attribution);
       return {
         attribution,
         installedAt: data.installedAt,
@@ -57,7 +42,9 @@ async function readStored(): Promise<InstallAttribution | null> {
 }
 
 export async function captureInstallAttribution(): Promise<InstallAttribution | null> {
-  // Android-only: iOS has no organic Install Referrer equivalent.
+  // iOS has no Install Referrer equivalent; Apple attribution comes from the
+  // AdServices token exchange instead, which owns its own marker and retries.
+  if (Platform.OS === 'ios') return captureAdServicesAttribution();
   if (Platform.OS !== 'android') return null;
 
   // Later launches: return the persisted capture so the bridge re-exposes it.
@@ -80,10 +67,7 @@ export async function captureInstallAttribution(): Promise<InstallAttribution | 
   } catch (e) {
     console.warn('[install-attribution] failed to parse install referrer', e);
   }
-  const attribution: Record<string, string> = {};
-  for (const key of ATTRIBUTION_KEYS) {
-    if (parsed[key]) attribution[key] = parsed[key];
-  }
+  const attribution = sanitizeAttribution(parsed);
   // `from` is the affiliate/channel id (money-routing). Kept separate from the
   // analytics `attribution` map so it never feeds the last-touch UTM fallback.
   const affiliateFrom = parsed.from || undefined;

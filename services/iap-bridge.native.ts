@@ -1,4 +1,5 @@
 import Constants from 'expo-constants';
+import * as Device from 'expo-device';
 import { Platform } from 'react-native';
 import Purchases, { PACKAGE_TYPE } from 'react-native-purchases';
 import type {
@@ -74,6 +75,13 @@ export function configureIAP(): void {
   }
   Purchases.configure({ apiKey, appUserID: null });
   configured = true;
+  // Apple Ads attribution. RevenueCat exchanges the AAAttribution token
+  // server-side (iOS 14.3+, standard payload, no ATT consent). Simulator has no
+  // AdServices and the native call hangs there, so device-only and never awaited.
+  if (Platform.OS === 'ios' && Device.isDevice) {
+    Purchases.enableAdServicesAttributionTokenCollection()
+      .catch((e) => console.warn('[iap] AdServices token collection failed', e));
+  }
   // Source the push token from the listener, never the identify path:
   // getDevicePushTokenAsync re-triggers remote-registration, so fetching it on
   // every identify would churn APNs/FCM registration (see intercom-bridge). One
