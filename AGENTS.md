@@ -55,6 +55,8 @@ Web → Native messages are JSON with `type` and payload fields. Audio types: `l
 
 Sentry (`@sentry/react-native`), Firebase Analytics, and PostHog (`services/posthog.ts`) are wired up. For PostHog details, refer to the code/config in this repo rather than hard-coded account metadata.
 
+Native shell events go through `trackEvent` (bare name in, `app_` prefix applied unconditionally). `app_webview_content_loaded` fires once per launch on the first successful WebView load — the native-person counterpart to `Application Installed`, so install→content converts without depending on native↔WebView identity stitching (pre-login the two SDKs are separate PostHog persons by design).
+
 ## Code Conventions
 
 - Comments — keep concise, at most 3 lines. Avoid breaking lines mid-sentence; break at punctuation when needed.
