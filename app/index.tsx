@@ -94,7 +94,7 @@ export default function App() {
   const webViewRef = useRef<WebView>(null);
   const canGoBackRef = useRef(false);
   const currentURLRef = useRef<string>('');
-  const [initialURL, setInitialURL] = useState<string | null>(null);
+  const [mountURL, setMountURL] = useState<string | null>(null);
   // Android install-referrer attribution, persisted natively and re-asserted on
   // the window for the web's getAnalyticsParameters fallback to read.
   const installAttributionRef = useRef<InstallAttribution | null>(null);
@@ -120,21 +120,28 @@ export default function App() {
     isLoaded,
   } = useDeepLinkRouting({ navigateWebView, currentURLRef });
 
+  // A remount re-navigates to `source`, so re-snapshot the live URL or a retry
+  // resumes where the app launched instead of where the user was. Vetted the
+  // same way as a cold start: currentURLRef also holds unnormalized URLs.
+  const handleRemount = useCallback(() => {
+    // Resets only the load gate: a deep link parked during a failed cold start
+    // survives the retry remount and flushes on the eventual successful load.
+    markLoadStarted();
+    setMountURL((prev) => resolveDeepLinkURL(currentURLRef.current) ?? prev);
+  }, [markLoadStarted]);
+
   const {
     isOnline,
     loadFailed,
     isRetryInProgress,
     webViewKey,
     seedConnectivity,
+    shouldPreserveDocument,
     notifyLoadSucceeded,
+    notifyDocumentLost,
     handleWebViewError,
     handleManualRetry,
-  } = useWebViewRecovery({
-    // Remount resets only the load gate. A deep link parked during a failed
-    // cold start intentionally survives the retry remount and flushes on the
-    // eventual successful load, not before.
-    onRemount: markLoadStarted,
-  });
+  } = useWebViewRecovery({ onRemount: handleRemount });
 
   useEffect(() => {
     // Kick off connectivity resolution in parallel with URL resolution — it's
@@ -164,7 +171,7 @@ export default function App() {
       // Await the connectivity seed before the WebView's first mount so a cold
       // offline launch already uses the offline cache mode on Android.
       await connectivityReady;
-      setInitialURL(url);
+      setMountURL(url);
     })();
   }, [seedConnectivity]);
 
@@ -250,8 +257,9 @@ export default function App() {
     // async: a tap landing between this call and onLoadStart would inject into
     // the now-dead JS context. Gate synchronously here to close that window.
     markLoadStarted();
+    notifyDocumentLost();
     webViewRef.current?.reload();
-  }, [markLoadStarted]);
+  }, [markLoadStarted, notifyDocumentLost]);
 
   // Success-only load handler (see notifyLoadSucceeded for why not onLoadEnd).
   // Inject attribution before markLoadCompleted flushes any parked navigation.
@@ -367,11 +375,11 @@ export default function App() {
     <>
       <View style={[styles.topSpacer, { height: insets.top }]} />
       <View style={styles.container}>
-        {initialURL && (
+        {mountURL && (
           <WebView
             key={webViewKey}
             ref={webViewRef}
-            source={{ uri: initialURL }}
+            source={{ uri: mountURL }}
             originWhitelist={['*']}
             style={styles.webview}
             applicationNameForUserAgent={APP_UA_SUFFIX}
@@ -389,8 +397,11 @@ export default function App() {
             // Suppress react-native-webview's built-in error page (the raw
             // "Error loading page / net::ERR_INTERNET_DISCONNECTED" Chromium
             // screen on Android, blank on iOS). LoadErrorOverlay is the single
-            // error surface; render a matching-color blank so there's no flash.
-            renderError={() => <View style={styles.errorFallback} />}
+            // error surface; render a matching-color blank so there's no flash,
+            // except over a preserved page, which the fill would itself hide.
+            renderError={() => (
+              <View style={shouldPreserveDocument() ? undefined : styles.errorFallback} />
+            )}
             webviewDebuggingEnabled={__DEV__}
             injectedJavaScriptBeforeContentLoaded={NATIVE_BRIDGE_BOOTSTRAP}
             onShouldStartLoadWithRequest={handleNavigationRequest}
@@ -433,8 +444,14 @@ const styles = StyleSheet.create({
   webview: {
     flex: 1,
   },
+  // Absolute, not flex: renderError's output is a sibling of the WebView, so a
+  // flex child would split the screen with the page instead of covering it.
   errorFallback: {
-    flex: 1,
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
     backgroundColor: '#f9f9f9',
   },
 });
