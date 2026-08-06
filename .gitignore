@@ -11,6 +11,9 @@ expo-env.d.ts
 
 # Native
 .kotlin/
+# Gradle output from local modules (`npx expo run:android`); the generated
+# /android folder is ignored below, but these live outside it.
+modules/*/android/build/
 *.orig.*
 *.jks
 *.p8
