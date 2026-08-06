@@ -26,8 +26,7 @@ export function resetIdentity(): Promise<void>;
 
 // Watch a boolean feature flag. `onChange` fires once with the value known at
 // call time, then again on every flags reload. `undefined` means unresolved —
-// flags not loaded yet, or no flag by this key exists — so callers pick their
-// own default for it. Only a flag that exists and is off reports `false`.
+// flags not loaded yet, or no flag by this key exists — so pick your own default.
 export function watchFeatureFlag(
   key: string,
   onChange: (enabled: boolean | undefined) => void,
