@@ -8,8 +8,8 @@ import { trackEvent, watchFeatureFlag } from './analytics';
 // budget and evicted oldest-written-first so it can't grow without limit.
 
 // Why a cached segment never reached disk. Anything the download itself throws
-// is a transport error, 'unavailable' is a filesystem we cannot open at all,
-// and the rest are rejections by validationFailure.
+// is a transport error, 'unavailable' means the cache directory could not be
+// opened at all, and the rest are rejections by validationFailure.
 type CacheFailureReason = 'too_small' | 'not_audio' | 'download_failed' | 'unavailable';
 
 type CacheEntry = { file: File; size: number; modifiedAt: number };
@@ -19,10 +19,8 @@ type CacheEntry = { file: File; size: number; modifiedAt: number };
 // CACHE_ENABLED is the build-time override (covers a fault that lands before
 // flags can load); the PostHog flag disables the cache in the field without a
 // release. watchFeatureFlag reports undefined both while flags are unresolved
-// and when the flag does not exist, so either leaves the cache on at the
-// shipped default; only a live flag set to false turns it off. Reading it as
-// isFeatureEnabled did instead kept this cache dead from 1.2.8 — a flag that
-// was never created came back false.
+// and when no flag by this key exists, so either leaves the cache on at the
+// shipped default; only a live flag set to false turns it off.
 const CACHE_ENABLED = true;
 const CACHE_FLAG_KEY = 'app-tts-audio-cache';
 
@@ -35,15 +33,8 @@ watchFeatureFlag(CACHE_FLAG_KEY, (enabled) => {
 // from using entries already on disk (the reason to kill the cache is usually
 // that an entry plays badly). Existing files are left for eviction and logout
 // to reclaim rather than deleted here.
-function cacheEnabled(): boolean {
-  return CACHE_ENABLED && cacheFlag !== false;
-}
-
-// Whether the cache is live, for stamping on the audio session event. A cache
-// switched off and one that is broken otherwise produce the same absence of
-// hits, which is how the 1.2.8 outage stayed invisible.
 export function isAudioCacheEnabled(): boolean {
-  return cacheEnabled();
+  return CACHE_ENABLED && cacheFlag !== false;
 }
 
 const CACHE_DIR_NAME = 'tts-audio';
@@ -138,7 +129,7 @@ function fileForKey(key: string): File {
 }
 
 export function getCachedAudioUri(url: string): string | null {
-  if (!cacheEnabled()) return null;
+  if (!isAudioCacheEnabled()) return null;
   try {
     const file = fileForKey(keyFor(url));
     return file.exists ? file.uri : null;
@@ -157,7 +148,7 @@ const MIN_SEGMENT_BYTES = 1024;
 // after Cloudflare Access session expiry) before they enter the cache.
 // Accepts an ID3 tag or an MPEG frame sync in the first bytes. Returns the
 // reason for a rejection so it can be reported, or null when the file passes.
-function validationFailure(file: File): Exclude<CacheFailureReason, 'download_failed'> | null {
+function validationFailure(file: File): 'too_small' | 'not_audio' | null {
   if (file.size < MIN_SEGMENT_BYTES) return 'too_small';
   const handle = file.open();
   try {
@@ -179,7 +170,7 @@ export function ensureCachedAudio(
   url: string,
   headers?: Record<string, string>,
 ): Promise<string | null> {
-  if (!cacheEnabled()) return Promise.resolve(null);
+  if (!isAudioCacheEnabled()) return Promise.resolve(null);
   const key = keyFor(url);
   const pending = inFlight.get(key);
   if (pending) return pending;
@@ -198,7 +189,7 @@ export function ensureCachedAudio(
     part = new File(cacheDir(), `${key}.${gen}.part`);
   } catch {
     // Filesystem unavailable — report a miss so the caller streams instead.
-    return Promise.resolve(reportUnavailable());
+    return Promise.resolve(reportFailure('unavailable'));
   }
 
   const download = File.downloadFileAsync(withBlocking(url), part, {
@@ -213,11 +204,11 @@ export function ensureCachedAudio(
         return null;
       }
       const failure = validationFailure(part);
-      if (failure) return reportFailure(part, failure);
+      if (failure) return reportFailure(failure, part);
       part.move(file);
       return file.uri;
     })
-    .catch(() => reportFailure(part, 'download_failed'))
+    .catch(() => reportFailure('download_failed', part))
     .finally(() => {
       evicted.delete(key);
       // After a clear this key belongs to post-clear downloads; only the
@@ -229,24 +220,20 @@ export function ensureCachedAudio(
   return download;
 }
 
+// Reasons already reported this launch. Every one of these fails for the whole
+// session once it starts — a full disk, an unopenable cache dir, auth serving
+// login pages — so reporting per call would put one event per segment on the
+// wire, thousands a book, for a condition the first event already described.
+const reportedReasons = new Set<CacheFailureReason>();
+
 // Drop the partial download and report why it never reached disk. Without this
 // a cache that never populates and one that populates without helping are the
 // same empty result in the data.
-function reportFailure(part: File, reason: CacheFailureReason): null {
-  tryDelete(part);
-  trackEvent('audio_cache_failed', { reason });
-  return null;
-}
-
-let reportedUnavailable = false;
-
-// The filesystem bail has no download to ride on, so it reports separately, and
-// only once per launch: a cache directory we cannot open is a property of the
-// launch, not of each segment that then fails to reach it.
-function reportUnavailable(): null {
-  if (!reportedUnavailable) {
-    reportedUnavailable = true;
-    trackEvent('audio_cache_failed', { reason: 'unavailable' satisfies CacheFailureReason });
+function reportFailure(reason: CacheFailureReason, part?: File): null {
+  if (part) tryDelete(part);
+  if (!reportedReasons.has(reason)) {
+    reportedReasons.add(reason);
+    trackEvent('audio_cache_failed', { reason });
   }
   return null;
 }

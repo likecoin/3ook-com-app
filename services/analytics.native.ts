@@ -94,14 +94,12 @@ export async function identify(
   await Promise.all(tasks);
 }
 
-// Resolve a flag to on / off / unresolved. Not isFeatureEnabled: that reports a
-// flag which does not exist as false, so a deleted flag reads as one turned off
-// and silently disables whatever it guards. The flags map holds only flags that
-// exist — an absent key is unresolved, a present one coerces (variant counts as on).
+// Resolve a flag to on / off / unresolved. Not isFeatureEnabled/getFeatureFlag:
+// both fall back to false for a flag that does not exist, so a never-created one
+// reads as deliberately off and silently disables whatever it guards. This keeps
+// the $feature_flag_called event they send; `enabled` is true for any variant.
 function readFlag(key: string): boolean | undefined {
-  const flags = posthog.getFeatureFlags();
-  if (!flags || !(key in flags)) return undefined;
-  return !!flags[key];
+  return posthog.getFeatureFlagResult(key)?.enabled;
 }
 
 // Watch a boolean feature flag. PostHog persists the last flags response, so on
@@ -114,7 +112,7 @@ export function watchFeatureFlag(
   // Subscribe before seeding: if the seed read throws, the caller must still
   // get later updates, or a kill-switch would be dead for the whole process.
   // Re-read inside the callback rather than using its argument — onFeatureFlag
-  // reports the raw flag, and readFlag applies the missing-vs-false rule.
+  // reports the raw flag, and readFlag applies the missing-vs-off rule.
   try {
     posthog.onFeatureFlag(key, () => onChange(readFlag(key)));
   } catch (e) {
