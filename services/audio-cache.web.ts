@@ -11,6 +11,10 @@ export function normalizeUrl(url: string): string {
 
 export function initAudioCache(): void {}
 
+export function isAudioCacheEnabled(): boolean {
+  return false;
+}
+
 export function getCachedAudioUri(_url: string): string | null {
   return null;
 }

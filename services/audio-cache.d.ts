@@ -9,6 +9,11 @@ export function normalizeUrl(url: string): string;
 // Call once at startup; the work is deferred off the first frame.
 export function initAudioCache(): void;
 
+// Whether the cache is currently live (build flag and kill-switch both on).
+// Reported on the audio session event so a switched-off cache and a broken one
+// are distinguishable in the data. Always false on web.
+export function isAudioCacheEnabled(): boolean;
+
 // Returns a local file:// URI if the segment for `url` is already on disk,
 // otherwise null. Synchronous (a filesystem stat) so it is safe to call on the
 // audio playback hot path.

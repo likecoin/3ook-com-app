@@ -21,6 +21,7 @@ import {
   ensureCachedAudio,
   evictCachedAudio,
   getCachedAudioUri,
+  isAudioCacheEnabled,
   normalizeUrl,
 } from './audio-cache';
 import type { SendToWebView, BridgeHandlerMap } from './bridge-dispatcher';
@@ -460,6 +461,10 @@ async function doLoad(msg: LoadMessage): Promise<void> {
     start_index: currentIndex,
     rate: currentRate,
     is_online: isOnline,
+    // Whether the segment cache was live for this session. cache_state alone
+    // cannot say: it reads 'miss' both when the cache is off and when it is on
+    // but never populating, which is how a dead cache went unnoticed.
+    cache_enabled: isAudioCacheEnabled(),
   });
   pendingStart = {
     index: currentIndex,
