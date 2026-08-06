@@ -45,6 +45,10 @@ export function useWebViewRecovery({ onRemount }: { onRemount: () => void }) {
   const isOnlineRef = useRef(true);
   const retryCountRef = useRef(0);
   const hadLoadFailureRef = useRef(false);
+  // onLoad fires on every full document load — retry remounts, the
+  // content-process-terminated reload, pull-to-refresh. Emit content-loaded once
+  // per launch so the install→content funnel counts reach, not reloads.
+  const contentLoadedRef = useRef(false);
   const retryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   // iOS keeps the committed document when a navigation fails before committing,
   // so a failure there costs the user nothing unless we cover it up or remount
@@ -100,6 +104,16 @@ export function useWebViewRecovery({ onRemount }: { onRemount: () => void }) {
   // Success-only — onLoadEnd also fires on error (after onError), which would
   // clobber the retry timer we just set. Wire this to onLoad, not onLoadEnd.
   const notifyLoadSucceeded = useCallback(() => {
+    // Ahead of the resets below so both properties still carry real values.
+    // had_failure is not implied by retry_count: the offline and reconnect
+    // paths zero the counter before recovery lands here.
+    if (!contentLoadedRef.current) {
+      contentLoadedRef.current = true;
+      trackEvent('webview_content_loaded', {
+        retry_count: retryCountRef.current,
+        had_failure: hadLoadFailureRef.current,
+      });
+    }
     if (hadLoadFailureRef.current) {
       trackEvent('webview_load_recovered', { retry_count: retryCountRef.current });
       hadLoadFailureRef.current = false;
