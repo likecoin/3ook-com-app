@@ -1,5 +1,6 @@
 import NetInfo, { type NetInfoState } from '@react-native-community/netinfo';
 import { useCallback, useEffect, useRef, useState } from 'react';
+import { Platform } from 'react-native';
 import type { WebViewErrorEvent } from 'react-native-webview/lib/WebViewTypes';
 
 import { trackEvent } from '../services/analytics';
@@ -7,6 +8,18 @@ import { trackEvent } from '../services/analytics';
 // NetInfo reports isConnected as boolean | null; treat null/unknown as online so
 // the WebView is never gated offline on an indeterminate signal.
 const isStateOnline = (state: NetInfoState) => state.isConnected !== false;
+
+const IS_IOS = Platform.OS === 'ios';
+
+// Path only — query strings on 3ook.com URLs can carry auth and session tokens.
+const toPathOnly = (url?: string) => {
+  if (!url) return null;
+  try {
+    return new URL(url).pathname;
+  } catch {
+    return null;
+  }
+};
 
 // Cold-start loads of 3ook.com sometimes fail with transient network errors
 // (NSURLErrorDomain -1004 cannot-connect-to-host being the most common) before
@@ -33,6 +46,10 @@ export function useWebViewRecovery({ onRemount }: { onRemount: () => void }) {
   const retryCountRef = useRef(0);
   const hadLoadFailureRef = useRef(false);
   const retryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // iOS keeps the committed document when a navigation fails before committing,
+  // so a failure there costs the user nothing unless we cover it up or remount
+  // over it. Android loses the page to Chromium's error screen either way.
+  const hasDocumentRef = useRef(false);
 
   // Seed connectivity before the WebView's first mount: the initial render
   // assumes online (LOAD_DEFAULT), so a cold offline launch would fail on the
@@ -55,12 +72,23 @@ export function useWebViewRecovery({ onRemount }: { onRemount: () => void }) {
     }
   }, []);
 
+  // Call whenever the rendered page goes away (iOS discarding the WebView
+  // content process, a remount) so the error surface takes over again.
+  const notifyDocumentLost = useCallback(() => {
+    hasDocumentRef.current = false;
+  }, []);
+
+  // Read at render time by renderError, which only runs after a failure — so a
+  // ref is enough and no re-render is needed to keep it truthful.
+  const shouldPreserveDocument = useCallback(() => IS_IOS && hasDocumentRef.current, []);
+
   const remountWebView = useCallback(() => {
     clearRetryTimer();
     setLoadFailed(false);
+    notifyDocumentLost();
     onRemount();
     setWebViewKey((k) => k + 1);
-  }, [clearRetryTimer, onRemount]);
+  }, [clearRetryTimer, notifyDocumentLost, onRemount]);
 
   const handleManualRetry = useCallback(() => {
     trackEvent('webview_load_retry', { trigger: 'manual' });
@@ -77,6 +105,7 @@ export function useWebViewRecovery({ onRemount }: { onRemount: () => void }) {
       hadLoadFailureRef.current = false;
     }
     retryCountRef.current = 0;
+    hasDocumentRef.current = true;
     clearRetryTimer();
     setLoadFailed(false);
     setIsRetryInProgress(false);
@@ -89,16 +118,23 @@ export function useWebViewRecovery({ onRemount }: { onRemount: () => void }) {
       // onShouldStartLoadWithRequest returning false to hand off to the system
       // browser. Not a real load failure — ignore.
       if (code === -999) return;
-      hadLoadFailureRef.current = true;
       const attempt = retryCountRef.current;
       const offline = !isOnlineRef.current;
+      const hadDocument = hasDocumentRef.current;
       trackEvent('webview_load_failed', {
         code,
         domain: domain ?? null,
         description: description ?? null,
         retry_count: attempt,
         offline,
+        had_document: hadDocument,
+        url_path: toPathOnly(e.nativeEvent.url),
       });
+      // Leave a live page alone: walling it off — or remounting, which
+      // re-navigates away — costs more than letting the failure be a no-op. The
+      // web app owns the messaging from here, since its JS context survives too.
+      if (hadDocument && IS_IOS) return;
+      hadLoadFailureRef.current = true;
       // Offline: remounting to the network just fails again, and on Android the
       // cached PWA shell was already attempted via cacheMode (LOAD_CACHE_ELSE_
       // NETWORK) on this same load. So skip the auto-retry burst, surface the
@@ -172,7 +208,9 @@ export function useWebViewRecovery({ onRemount }: { onRemount: () => void }) {
     isRetryInProgress,
     webViewKey,
     seedConnectivity,
+    shouldPreserveDocument,
     notifyLoadSucceeded,
+    notifyDocumentLost,
     handleWebViewError,
     handleManualRetry,
   };
