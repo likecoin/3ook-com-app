@@ -86,6 +86,10 @@ const config: ExpoConfig = {
         'This app uses your microphone to record your voice and create a custom voice for the text-to-speech feature.',
       NSCameraUsageDescription:
         'This app uses the camera to take a profile photo and capture photos for customer service requests.',
+      // No app code saves photos — this is WKWebView's own image context menu
+      // ("Add to Photos"). Without the key iOS crashes instead of denying it.
+      NSPhotoLibraryAddUsageDescription:
+        'This app saves images you choose to save to your photo library.',
       NSAppTransportSecurity: {
         NSAllowsLocalNetworking: true,
         NSAllowsArbitraryLoadsForMedia: true,

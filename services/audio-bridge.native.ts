@@ -58,6 +58,10 @@ type PreloadState = 'hit' | 'miss' | 'fresh';
 // serving bad files shows up as a hit-skewed stall rate.
 type CacheState = 'hit' | 'miss';
 
+// Which call hit a deactivated audio session. Reported so a session that never
+// recovers is distinguishable from a plain network stall.
+type SessionRetryStage = 'player_activation' | 'stuck_retry' | 'resume' | 'interruption_resume';
+
 let playerA: AudioPlayer | null = null;
 let playerB: AudioPlayer | null = null;
 let activeSlot: 'A' | 'B' = 'A';
@@ -283,7 +287,7 @@ function armStuckTimer(): void {
       p.replace(streamSource(track));
       p.setPlaybackRate(currentRate);
     }
-    p.play();
+    withSessionRetry('stuck_retry', p, () => p.play());
     stuckTimer = setTimeout(() => {
       stuckTimer = null;
       if (lastSentState === 'playing' || !active || errored) return;
@@ -295,6 +299,40 @@ function armStuckTimer(): void {
   }, STUCK_TIMEOUT_MS);
 }
 
+// Wait for any pending release (as doLoad does), re-assert the session, then
+// run once more if playback is still wanted. `p` cancels the retry if the queue
+// swapped slots meanwhile; pass null to resolve the active player at retry time.
+function reassertSession(stage: SessionRetryStage, p: AudioPlayer | null, run: () => void): void {
+  Promise.resolve(sessionReleasePromise)
+    // A stop mid-await wins — reactivating would hold the session with nothing
+    // playing, ducking other apps under interruptionMode 'doNotMix'.
+    .then(() => (active && !errored ? setIsAudioActiveAsync(true) : null))
+    .then(() => {
+      if (!active || errored) return;
+      if (p && getActivePlayer() !== p) return;
+      run();
+    })
+    .catch((err) => {
+      console.warn(`${stage} failed after session retry:`, err);
+      trackEvent('audio_session_retry_failed', {
+        stage,
+        current_index: currentIndex,
+        is_online: isOnline,
+      });
+    });
+}
+
+// Only play() activates the AVAudioSession, and it throws synchronously when
+// iOS has left it deactivated. Catch that instead of crashing, then retry once.
+function withSessionRetry(stage: SessionRetryStage, p: AudioPlayer, run: () => void): void {
+  try {
+    run();
+  } catch (e) {
+    console.warn(`${stage} failed — re-asserting audio session:`, e);
+    reassertSession(stage, p, run);
+  }
+}
+
 function activatePlayer(p: AudioPlayer, track: QueueTrack): void {
   p.setPlaybackRate(currentRate);
   p.setActiveForLockScreen(true, {
@@ -302,7 +340,7 @@ function activatePlayer(p: AudioPlayer, track: QueueTrack): void {
     artist: track.artist,
     artworkUrl: track.artworkUrl,
   });
-  p.play();
+  withSessionRetry('player_activation', p, () => p.play());
 }
 
 function playTrack(p: AudioPlayer, track: QueueTrack): void {
@@ -485,7 +523,8 @@ export function handleResume(): void {
   active = true;
   errored = false;
   stuckRetried = false;
-  getActivePlayer()?.play();
+  const p = getActivePlayer();
+  if (p) withSessionRetry('resume', p, () => p.play());
 }
 
 export function handleStop(): void {
@@ -735,13 +774,9 @@ export function registerEventListeners(sendToWebView: SendToWebView) {
   const interruptionEndedSub = addInterruptionEndedListener((_event) => {
     if (wasPlayingBeforeInterruption && active && !errored) {
       // iOS can leave the session deactivated after an interruption; a bare
-      // play() then throws "Session activation failed". Wait for any pending
-      // release (as doLoad does), re-assert the session, then resume.
-      Promise.resolve(sessionReleasePromise)
-        .then(() => setIsAudioActiveAsync(true))
-        // Re-check: the user may have paused or stopped during the await.
-        .then(() => { if (active && !errored) getActivePlayer()?.play(); })
-        .catch((e) => console.warn('Interruption resume failed:', e));
+      // play() then throws "Session activation failed". Re-assert before
+      // resuming rather than catching the throw as the other call sites do.
+      reassertSession('interruption_resume', null, () => getActivePlayer()?.play());
     }
     wasPlayingBeforeInterruption = false;
   });
