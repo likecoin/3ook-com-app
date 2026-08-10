@@ -1,7 +1,7 @@
 import Constants from 'expo-constants';
 import * as Device from 'expo-device';
 import { Platform } from 'react-native';
-import Purchases, { PACKAGE_TYPE } from 'react-native-purchases';
+import Purchases, { INTRO_ELIGIBILITY_STATUS, PACKAGE_TYPE } from 'react-native-purchases';
 import type {
   CustomerInfo,
   PurchasesOffering,
@@ -268,6 +268,33 @@ function extractIntroOffer(product: PurchasesStoreProduct): IntroOffer | undefin
   return undefined;
 }
 
+// Of the products carrying an intro offer, the ones this store account may actually be
+// shown it for. StoreKit advertises a product's introductory offer to everyone, but
+// eligibility is per subscription group and once per Apple ID — a returning subscriber
+// shown "$1 for 7 days" would be charged full price at the payment sheet.
+async function getIntroEligibleProductIds(productIds: string[]): Promise<Set<string>> {
+  // Android always answers UNKNOWN, and Play already omits offers the account can't use
+  // from the product's options, so gating there would hide every Android intro offer.
+  if (Platform.OS !== 'ios') return new Set(productIds);
+  if (!productIds.length) return new Set();
+  try {
+    const eligibility = await Purchases.checkTrialOrIntroductoryPriceEligibility(productIds);
+    // Only a definite ELIGIBLE shows the offer. UNKNOWN (RevenueCat couldn't resolve the
+    // subscription group) falls back to the non-intro price, per RevenueCat's guidance:
+    // under-promising costs an upsell, over-promising is a bait-and-switch.
+    return new Set(
+      productIds.filter(
+        (id) => eligibility[id]?.status
+          === INTRO_ELIGIBILITY_STATUS.INTRO_ELIGIBILITY_STATUS_ELIGIBLE,
+      ),
+    );
+  } catch (e) {
+    // Fail closed for the same reason — no trial shown is the safe outcome.
+    console.warn('[iap] intro eligibility check failed', e);
+    return new Set();
+  }
+}
+
 // The web sends the backend internal user id as `likerId`. Normalize it
 // identically everywhere (trim; empty → undefined) so identifyUser logs in under
 // exactly the id purchase/restore expect — a stray space would mint a distinct
@@ -494,7 +521,8 @@ export function getIAPHandlers(send: SendToWebView): BridgeHandlerMap {
     // Stripe-configured ones (displayed price must equal the charged price).
     // Also carries the store's intro offer (`trialPeriodDays` / `isFreeTrial` /
     // `introPrice…`) so the web shows the trial the store will actually grant
-    // rather than a hardcoded one — omitted when the product has no intro offer.
+    // rather than a hardcoded one — omitted when the product has no intro offer,
+    // or when this store account is no longer eligible for it.
     iapGetOfferings: async (msg) => {
       // Same optional `tier` field as iapPurchase; the tier is echoed back so
       // the web can match a response to the offering it asked for. A missing
@@ -503,8 +531,21 @@ export function getIAPHandlers(send: SendToWebView): BridgeHandlerMap {
       try {
         const offerings = await Purchases.getOfferings();
         const offering = offeringForTier(offerings, tier);
-        const packages = (offering?.availablePackages ?? []).map((p) => {
+        const availablePackages = offering?.availablePackages ?? [];
+        // Resolve the offers first so eligibility is only asked about products that
+        // actually carry one — the iOS check fetches and inspects each id serially.
+        const introByProductId = new Map<string, IntroOffer>();
+        availablePackages.forEach((p) => {
           const intro = extractIntroOffer(p.product);
+          if (intro) introByProductId.set(p.product.identifier, intro);
+        });
+        const introEligible = await getIntroEligibleProductIds([...introByProductId.keys()]);
+        const packages = availablePackages.map((p) => {
+          // Drop the offer entirely rather than reporting it with a flag: the web reads
+          // a missing intro as "no trial", which is exactly what this user gets.
+          const intro = introEligible.has(p.product.identifier)
+            ? introByProductId.get(p.product.identifier)
+            : undefined;
           return {
             period:
               p.packageType === PACKAGE_TYPE.MONTHLY
