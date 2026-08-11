@@ -268,10 +268,9 @@ function extractIntroOffer(product: PurchasesStoreProduct): IntroOffer | undefin
   return undefined;
 }
 
-// Of the products carrying an intro offer, the ones this store account may actually be
-// shown it for. StoreKit advertises a product's introductory offer to everyone, but
-// eligibility is per subscription group and once per Apple ID — a returning subscriber
-// shown "$1 for 7 days" would be charged full price at the payment sheet.
+// Returns intro-offer product ids eligible for the current store account.
+// StoreKit advertises offers regardless of per-subscription-group eligibility.
+// Returning subscribers otherwise see the full price at the payment sheet.
 async function getIntroEligibleProductIds(productIds: string[]): Promise<Set<string>> {
   // Android always answers UNKNOWN, and Play already omits offers the account can't use
   // from the product's options, so gating there would hide every Android intro offer.
