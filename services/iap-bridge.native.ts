@@ -1,15 +1,21 @@
 import Constants from 'expo-constants';
 import * as Device from 'expo-device';
 import { Platform } from 'react-native';
-import Purchases, { INTRO_ELIGIBILITY_STATUS, PACKAGE_TYPE } from 'react-native-purchases';
+import Purchases, {
+  INTRO_ELIGIBILITY_STATUS,
+  PACKAGE_TYPE,
+  PURCHASES_ERROR_CODE,
+} from 'react-native-purchases';
 import type {
   CustomerInfo,
+  PurchasesError,
   PurchasesOffering,
   PurchasesOfferings,
   PurchasesPackage,
   PurchasesStoreProduct,
 } from 'react-native-purchases';
 
+import type { AnalyticsProperties } from './analytics';
 import { getFirebaseAppInstanceId, trackEvent } from './analytics';
 import type { BridgeHandlerMap, SendToWebView } from './bridge-dispatcher';
 import { addDeviceTokenListener, getCurrentDeviceToken } from './push-bridge';
@@ -303,6 +309,27 @@ function normalizeLikerId(likerId: unknown): string | undefined {
   return typeof likerId === 'string' && likerId.trim() ? likerId.trim() : undefined;
 }
 
+// Firebase Analytics truncates parameter values past 100 characters.
+const MAX_ERROR_MESSAGE_LENGTH = 100;
+
+// Splits the single `exception` bucket by store-side cause — a store outage, a
+// dropped network and a pending payment otherwise look identical. Keys are omitted
+// rather than set to undefined so a non-RevenueCat throw records no empty properties.
+function errorProperties(e: unknown): AnalyticsProperties {
+  const err = (e ?? {}) as Partial<PurchasesError>;
+  // Names the PURCHASES_ERROR_CODE (STORE_PROBLEM_ERROR, NETWORK_ERROR…), which is
+  // the dimension worth breaking down on. Deprecated at the top level, so via userInfo.
+  const readableCode = err.userInfo?.readableErrorCode;
+  // The cast is an assertion, not a guarantee — a non-RevenueCat throw can carry a
+  // non-string message, and slicing that would throw from inside a catch block.
+  const raw = err.underlyingErrorMessage || err.message;
+  const message = typeof raw === 'string' ? raw.slice(0, MAX_ERROR_MESSAGE_LENGTH) : '';
+  return {
+    ...(readableCode && { readable_code: readableCode }),
+    ...(message && { error_message: message }),
+  };
+}
+
 // Logs the user into RevenueCat under `appUserId` (the backend internal user id
 // / likerId) so purchases attribute to the right user for the webhook to match.
 // Used by identifyUser (best-effort), and re-checked before purchase/restore as a
@@ -445,14 +472,15 @@ export function getIAPHandlers(send: SendToWebView): BridgeHandlerMap {
           is_civic: isCivic,
         });
       } catch (e) {
-        const err = e as { userCancelled?: boolean; message?: string };
-        if (err.userCancelled) {
+        const err = e as Partial<PurchasesError>;
+        // Not err.userCancelled — it is deprecated, and the SDK derives it from this code.
+        if (err.code === PURCHASES_ERROR_CODE.PURCHASE_CANCELLED_ERROR) {
           send({ type: 'iapPurchaseResult', status: 'cancelled', period, tier });
           trackEvent('iap_purchase_cancelled', { period, tier });
           return;
         }
         send({ type: 'iapPurchaseResult', status: 'error', period, tier, message: err.message || 'Purchase failed' });
-        trackEvent('iap_purchase_error', { period, tier, reason: 'exception' });
+        trackEvent('iap_purchase_error', { period, tier, reason: 'exception', ...errorProperties(e) });
         console.warn('[iap] purchase failed', e);
       }
     },
@@ -480,9 +508,9 @@ export function getIAPHandlers(send: SendToWebView): BridgeHandlerMap {
         send({ type: 'iapRestoreResult', status: 'success', isPlus, isCivic });
         trackEvent('iap_restore_success', { is_plus: isPlus, is_civic: isCivic });
       } catch (e) {
-        const err = e as { message?: string };
+        const err = e as Partial<PurchasesError>;
         send({ type: 'iapRestoreResult', status: 'error', message: err.message || 'Restore failed' });
-        trackEvent('iap_restore_error', { reason: 'exception' });
+        trackEvent('iap_restore_error', { reason: 'exception', ...errorProperties(e) });
         console.warn('[iap] restore failed', e);
       }
     },
@@ -505,9 +533,11 @@ export function getIAPHandlers(send: SendToWebView): BridgeHandlerMap {
           await openExternalURL(MANAGE_SUBSCRIPTION_URL);
           isFallback = true;
         } catch (fallbackError) {
-          const err = e as { message?: string };
+          const err = e as Partial<PurchasesError>;
           send({ type: 'iapManageResult', status: 'error', message: err.message || 'Manage failed' });
-          trackEvent('iap_manage_error');
+          // The showManageSubscriptions failure, not the fallback's — it says why the
+          // native sheet couldn't be resolved.
+          trackEvent('iap_manage_error', errorProperties(e));
           console.warn('[iap] manage subscription failed', e, fallbackError);
           return;
         }
@@ -566,7 +596,10 @@ export function getIAPHandlers(send: SendToWebView): BridgeHandlerMap {
         });
         send({ type: 'iapOfferings', tier, packages });
       } catch (e) {
+        // The web reads an empty `packages` as "no plans available" and renders a
+        // priceless paywall, so without this a failed catalog fetch leaves no trace.
         send({ type: 'iapOfferings', tier, packages: [] });
+        trackEvent('iap_offerings_error', { tier, ...errorProperties(e) });
         console.warn('[iap] getOfferings failed', e);
       }
     },
