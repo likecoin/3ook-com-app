@@ -42,6 +42,10 @@ export interface LoadMessage {
     authorName: string;
     coverUrl: string;
   };
+  // Segments to keep on disk ahead of the playhead. Web decides it because only
+  // web knows entitlement and TTS trial quota; omitted means 1, i.e. no
+  // prefetch, which is what every build predating this field gets.
+  prefetchCount?: number;
 }
 
 interface QueueTrack {
@@ -71,6 +75,17 @@ let activeSlot: 'A' | 'B' = 'A';
 const preload = { readyIndex: -1, loadingIndex: -1, downloadingIndex: -1, resetCount: 0 };
 let idleSub: { remove(): void } | null = null;
 
+// 120 is ~26 minutes at the 13s median segment, a few MB against a 150MB cache
+// budget. Clamped here because this side owns the bandwidth it spends.
+const MAX_PREFETCH_COUNT = 120;
+
+// Disk lookahead state. `cursor` is the next index to examine, so a warm window
+// costs no re-stat per status tick; `generation` is bumped by load/stop so a
+// loop parked on a download abandons a queue it no longer belongs to.
+// `base` is the playhead the cursor was computed against, so a backward skip is
+// detectable and the cursor can be rewound.
+const prefetch = { depth: 1, generation: 0, running: false, armed: false, cursor: 0, base: -1 };
+
 let queue: QueueTrack[] = [];
 let currentIndex = -1;
 let currentRate = 1;
@@ -87,6 +102,7 @@ let loadPromise: Promise<void> = Promise.resolve();
 let sessionReleasePromise: Promise<void> | null = null;
 let notifyWebView: SendToWebView | null = null;
 let lastSentState = '';
+let lastSentWarmedThrough = -1;
 
 // Stuck detection state
 // Longer than web player's 5s because iOS uses blocking=1 URLs where the
@@ -227,8 +243,93 @@ function startIdleLoad(idle: AudioPlayer, source: PlayerSource, nextIndex: numbe
       preload.loadingIndex = -1;
       idleSub?.remove();
       idleSub = null;
+      // The N+1 buffer is runway too, and it is the whole runway before
+      // prefetch has filled anything.
+      notifyWarmedThrough();
     }
   });
+}
+
+// Fill the disk cache ahead of the playhead so a dropout mid-queue is silent
+// rather than a stall. Touches no AudioPlayer: preloadNext keeps its
+// single-segment lookahead, and both it and playbackSource read these files.
+async function runPrefetch(): Promise<void> {
+  const generation = prefetch.generation;
+  for (;;) {
+    if (generation !== prefetch.generation) return;
+    if (!active || !prefetch.armed || !isAudioCacheEnabled() || prefetch.depth <= 1) return;
+    // A player that isn't playing is buffering — bandwidth-starved, so
+    // competing with it is exactly wrong — or paused, with no runway to protect.
+    if (lastSentState !== 'playing') return;
+
+    // currentIndex + 1 belongs to preloadNext.
+    const end = Math.min(currentIndex + prefetch.depth, queue.length - 1);
+    // Any backward skip leaves segments behind the cursor unexamined; rescan
+    // from the window start.
+    if (currentIndex < prefetch.base || prefetch.cursor > end + 1) {
+      prefetch.cursor = currentIndex + 2;
+    }
+    prefetch.base = currentIndex;
+    let index = Math.max(currentIndex + 2, prefetch.cursor);
+    while (index <= end && getCachedAudioUri(queue[index].uri)) index++;
+    prefetch.cursor = index;
+    if (index > end) return; // Window already full.
+
+    const track = queue[index];
+    // null is a bad network or an expired cookie, neither of which the next
+    // segment will fix — stop rather than hammer it. A track advance re-arms.
+    if (!(await ensureCachedAudio(track.uri, track.headers))) return;
+    prefetch.cursor = index + 1;
+    notifyWarmedThrough();
+  }
+}
+
+function schedulePrefetch(): void {
+  if (prefetch.running) return;
+  prefetch.running = true;
+  void runPrefetch().finally(() => {
+    prefetch.running = false;
+    // Covers every early return above, a stalled window included.
+    notifyWarmedThrough();
+  });
+}
+
+// Drop any in-progress lookahead: the queue, the playhead, or the cache itself
+// changed under it. Leaves `running` to the parked loop's own finally.
+function resetPrefetch(): void {
+  prefetch.generation += 1;
+  prefetch.armed = false;
+  prefetch.cursor = 0;
+  prefetch.base = -1;
+}
+
+// Highest index playable with no network, contiguous from the playhead:
+// preloadNext's buffered N+1 plus whatever prefetch has put on disk.
+function warmedThroughIndex(): number {
+  if (!active || currentIndex < 0 || !queue.length) return -1;
+  const nextIndex = currentIndex + 1;
+  if (nextIndex >= queue.length) return currentIndex;
+  // Nothing further along is contiguous with the playhead without this one.
+  // getCachedAudioUri self-gates on the cache flag, so no guard here.
+  const nextIsWarm =
+    preload.readyIndex === nextIndex || !!getCachedAudioUri(queue[nextIndex].uri);
+  if (!nextIsWarm) return currentIndex;
+  if (!isAudioCacheEnabled()) return nextIndex;
+  // Read the cursor the prefetch scan already advanced rather than re-stat the
+  // window every status tick. A backward skip leaves the gap below the old base
+  // unexamined, which is the one case the cursor can't answer.
+  if (currentIndex < prefetch.base) return nextIndex;
+  return Math.max(nextIndex, prefetch.cursor - 1);
+}
+
+// See the warmDepth capability in app/index.tsx for why web needs this. `force`
+// resends after a suspended WebView dropped one, where the value may be
+// unchanged and -1 is a real index rather than a spare sentinel.
+function notifyWarmedThrough(force = false): void {
+  const index = warmedThroughIndex();
+  if (!force && index === lastSentWarmedThrough) return;
+  lastSentWarmedThrough = index;
+  notifyWebView?.({ type: 'warmedThrough', index });
 }
 
 function getOrCreatePlayers(): AudioPlayer {
@@ -478,6 +579,13 @@ async function doLoad(msg: LoadMessage): Promise<void> {
   currentRate = msg.rate;
   lastFinishTime = 0;
   active = true;
+  // Clamp rather than trust web. A depth of 1 disables prefetch entirely,
+  // which is what every web build predating prefetchCount gets.
+  const requestedDepth = Math.floor(Number(msg.prefetchCount));
+  prefetch.depth = Number.isFinite(requestedDepth)
+    ? Math.min(Math.max(requestedDepth, 1), MAX_PREFETCH_COUNT)
+    : 1;
+  resetPrefetch();
   // New book (or a voice-actor switch, which the web implements as stop → load):
   // the "finished a book" threshold measures this load only.
   updateListening(false);
@@ -494,6 +602,8 @@ async function doLoad(msg: LoadMessage): Promise<void> {
     lastIndex: -1,
     preloadState: 'fresh' satisfies PreloadState,
   });
+  // Forced: a new queue starts cold however warm the last one was.
+  notifyWarmedThrough(true);
   trackEvent('audio_session_started', {
     track_count: queue.length,
     start_index: currentIndex,
@@ -535,6 +645,8 @@ export function handleStop(): void {
   updateListening(false);
   resetRecoveryState();
   clearStuckTimer();
+  // Stop filling a queue nobody is listening to.
+  resetPrefetch();
   // Skip replace(null) — iOS expo-audio cannot cast null to AudioSource.
   // Pause is enough; players are reused with replace(source) on next load.
   getActivePlayer()?.pause();
@@ -602,8 +714,16 @@ export function handleSkipTo(index: number, { resetFinishGuard = true } = {}): v
     // Whether this segment was already on disk when we advanced to it.
     cache_state: cacheState,
     is_online: isOnline,
+    prefetch_depth: prefetch.depth,
   });
   preloadNext();
+  // Arm only once a segment boundary has been crossed: a book sampled and
+  // abandoned would otherwise force a whole window of blocking TTS synthesis.
+  prefetch.armed = true;
+  schedulePrefetch();
+  // Publish the window schedulePrefetch just rescanned synchronously; its own
+  // finally may be a whole download away.
+  notifyWarmedThrough();
 }
 
 export function handleSetRate(rate: number): void {
@@ -636,13 +756,20 @@ export function getAudioHandlers(): BridgeHandlerMap {
     // App-managed content caches — currently just TTS audio; hook future
     // content caches in here. The WebView HTTP/SW cache stays separate
     // (clearWebViewCache — it reloads); logout also clears via resetUser.
-    clearNativeCaches: () => clearAudioCache(),
+    // resetPrefetch too: the cursor records what used to be on disk, and the
+    // files it counted are gone.
+    clearNativeCaches: () => {
+      clearAudioCache();
+      resetPrefetch();
+      notifyWarmedThrough();
+    },
   };
 }
 
 export function registerEventListeners(sendToWebView: SendToWebView) {
   notifyWebView = sendToWebView;
   lastSentState = '';
+  lastSentWarmedThrough = -1;
   getOrCreatePlayers();
 
   function onStatus(sourcePlayer: AudioPlayer, status: AudioStatus) {
@@ -702,6 +829,7 @@ export function registerEventListeners(sendToWebView: SendToWebView) {
           cache_state: pendingStart.cacheState,
           stuck_retried: stuckRetried,
           is_online: isOnline,
+          prefetch_depth: prefetch.depth,
         });
         pendingStart = null;
       }
@@ -715,6 +843,12 @@ export function registerEventListeners(sendToWebView: SendToWebView) {
       preload.downloadingIndex < 0
     ) {
       preloadNext();
+    }
+
+    // The loop stands itself down whenever state isn't 'playing', so the tick
+    // is what brings it back.
+    if (state === 'playing') {
+      schedulePrefetch();
     }
 
     // Handle track finish
@@ -787,6 +921,9 @@ export function registerEventListeners(sendToWebView: SendToWebView) {
   const appStateSub = AppState.addEventListener('change', (nextAppState) => {
     if (nextAppState === 'active' && currentIndex >= 0) {
       notifyWebView?.({ type: 'trackChanged', index: currentIndex, lastIndex: -1, isResync: true });
+      // Same staleness, same fix: every warmedThrough sent while suspended was
+      // dropped, so force one out alongside the playhead it is measured from.
+      notifyWarmedThrough(true);
       if (lastSentState) {
         notifyWebView?.({ type: 'playbackState', state: lastSentState });
       }

@@ -86,6 +86,14 @@ const NATIVE_BRIDGE_FEATURES: readonly string[] = [
   // clear-caches flow. Deliberately not gated by the cache kill-switch flag:
   // clearing must work even when the cache is flagged off.
   'clearNativeCaches',
+  // Honours `prefetchCount` on the load message — keeps N segments on disk
+  // ahead of the playhead so a dropout mid-queue doesn't stall playback.
+  // Web owns the depth because only it knows entitlement and TTS trial quota.
+  'deepPrefetch',
+  // Reports how deep the cache actually is (`warmedThrough`), so web can judge
+  // a dropout on what is local instead of on the depth it asked for. The two
+  // differ while prefetch fills, and entirely when the cache kill-switch is off.
+  'warmDepth',
 ];
 const NATIVE_BRIDGE_BOOTSTRAP = `(function(){try{window.__nativeBridge=window.__nativeBridge||{};window.__nativeBridge.features=${JSON.stringify(NATIVE_BRIDGE_FEATURES)};}catch(e){}})();true;`;
 
