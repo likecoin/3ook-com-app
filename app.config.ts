@@ -171,7 +171,11 @@ const config: ExpoConfig = {
           ccacheEnabled: true,
         },
         android: {
-          buildArchs: ['armeabi-v7a', 'arm64-v8a'],
+          // Play/EAS still ships 32-bit. Local Android Studio / expo run only
+          // needs arm64-v8a; compiling both ABIs roughly doubles native time.
+          buildArchs: process.env.EAS_BUILD
+            ? ['armeabi-v7a', 'arm64-v8a']
+            : ['arm64-v8a'],
         },
       },
     ],
