@@ -1,6 +1,7 @@
 import * as Sentry from '@sentry/react-native';
 
 import { identify, resetIdentity } from './analytics';
+import { clearAudioCache } from './audio-cache';
 import type { BridgeHandlerMap } from './bridge-dispatcher';
 
 export function getIdentityHandlers(): BridgeHandlerMap {
@@ -13,6 +14,8 @@ export function getIdentityHandlers(): BridgeHandlerMap {
       const displayName =
         typeof msg.displayName === 'string' ? msg.displayName : undefined;
       const isLikerPlus = !!msg.isLikerPlus;
+      const likerPlusTier =
+        typeof msg.likerPlusTier === 'string' ? msg.likerPlusTier : undefined;
       const loginMethod =
         typeof msg.loginMethod === 'string' ? msg.loginMethod : undefined;
       const locale = typeof msg.locale === 'string' ? msg.locale : undefined;
@@ -27,6 +30,7 @@ export function getIdentityHandlers(): BridgeHandlerMap {
         email,
         displayName,
         isLikerPlus,
+        likerPlusTier,
         loginMethod,
         locale,
         gaUserId,
@@ -40,6 +44,9 @@ export function getIdentityHandlers(): BridgeHandlerMap {
     },
 
     resetUser: async () => {
+      // Drop cached TTS audio so it can't replay under a different account on a
+      // shared device.
+      clearAudioCache();
       await resetIdentity();
       Sentry.setUser(null);
     },

@@ -41,28 +41,55 @@ if (!intercomPlugin) {
   );
 }
 
+// RevenueCat (in-app purchases) public SDK keys, surfaced to the runtime via
+// `extra` so the iap-bridge can read the platform-appropriate key. No native
+// config plugin is required — `react-native-purchases` autolinks on prebuild.
+const revenueCatEnv = {
+  iosApiKey: process.env.REVENUECAT_IOS_API_KEY,
+  androidApiKey: process.env.REVENUECAT_ANDROID_API_KEY,
+};
+
+if (!revenueCatEnv.iosApiKey && !revenueCatEnv.androidApiKey) {
+  console.warn(
+    '[iap] REVENUECAT_IOS_API_KEY / REVENUECAT_ANDROID_API_KEY missing — in-app purchases disabled in this build.'
+  );
+}
+
 const config: ExpoConfig = {
   name: '3ook.com',
   owner: 'likerland',
   slug: '3ook-com-app',
-  version: '1.1.7',
+  version: '1.3.1',
   orientation: 'portrait',
   icon: './assets/images/icon.png',
   scheme: 'com.3ook',
   userInterfaceStyle: 'automatic',
+  // iOS picks the first preferred language with a matching .lproj, so Chinese
+  // needs its own locale file — otherwise a zh device with en in its list
+  // falls through to en.json instead of the Chinese base name.
+  locales: {
+    en: './locales/en.json',
+    'zh-Hant': './locales/zh-Hant.json',
+    'zh-Hans': './locales/zh-Hans.json',
+  },
   ios: {
     supportsTablet: true,
     bundleIdentifier: 'land.liker.book3app',
     googleServicesFile: './GoogleService-Info.plist',
     associatedDomains: ['applinks:3ook.com', 'webcredentials:3ook.com'],
     infoPlist: {
-      CFBundleDisplayName: '3ook Reader',
+      CFBundleDisplayName: '3ook.com',
+      CFBundleAllowMixedLocalizations: true,
       ITSAppUsesNonExemptEncryption: false,
       IntercomUniversalLinkDomains: ['3ook.com'],
       NSMicrophoneUsageDescription:
         'This app uses your microphone to record your voice and create a custom voice for the text-to-speech feature.',
       NSCameraUsageDescription:
         'This app uses the camera to take a profile photo and capture photos for customer service requests.',
+      // No app code saves photos — this is WKWebView's own image context menu
+      // ("Add to Photos"). Without the key iOS crashes instead of denying it.
+      NSPhotoLibraryAddUsageDescription:
+        'This app saves images you choose to save to your photo library.',
       NSAppTransportSecurity: {
         NSAllowsLocalNetworking: true,
         NSAllowsArbitraryLoadsForMedia: true,
@@ -144,7 +171,7 @@ const config: ExpoConfig = {
           ccacheEnabled: true,
         },
         android: {
-          buildArchs: ['arm64-v8a'],
+          buildArchs: ['armeabi-v7a', 'arm64-v8a'],
         },
       },
     ],
@@ -177,6 +204,7 @@ const config: ExpoConfig = {
     eas: {
       projectId: 'b9b3551b-65fa-4f8e-b570-2bbb220b971b',
     },
+    revenueCat: revenueCatEnv,
   },
 };
 

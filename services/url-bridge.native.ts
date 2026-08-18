@@ -1,7 +1,9 @@
 import * as Linking from 'expo-linking';
+import * as WebBrowser from 'expo-web-browser';
+import { Platform } from 'react-native';
 
 const DEEP_LINK_SCHEME_RE =
-  /^(mailto:|tel:|wc:|metamask:|cbwallet:|rainbow:|trust:)/;
+  /^(mailto:|tel:|wc:|metamask:|cbwallet:|rainbow:|trust:|keplrwallet:)/;
 
 const WALLET_UNIVERSAL_LINK_PREFIXES = [
   'https://metamask.app.link/',
@@ -24,5 +26,20 @@ export async function openDeepLink(url: string): Promise<void> {
 }
 
 export async function openExternalURL(url: string): Promise<void> {
+  // Android routes our own verified app links back into this app (a loop),
+  // so open a Custom Tab; iOS sends self-opened universal links to Safari.
+  if (Platform.OS === 'android' && isOwnAppLinkURL(url)) {
+    await WebBrowser.openBrowserAsync(url);
+    return;
+  }
   await Linking.openURL(url);
+}
+
+function isOwnAppLinkURL(url: string): boolean {
+  try {
+    const parsed = new URL(url);
+    return parsed.protocol === 'https:' && parsed.hostname.toLowerCase() === '3ook.com';
+  } catch {
+    return false;
+  }
 }

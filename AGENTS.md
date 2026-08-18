@@ -35,7 +35,9 @@ The web app itself lives in a separate repo (`liker-land-v3`, a Nuxt 3 PWA). Thi
 7. **`services/push-bridge.native.ts`** — `expo-notifications` permission and token plumbing.
 8. **`services/url-bridge.native.ts`** + **`services/url-storage.native.ts`** — Deep-link parsing, last-visited URL persistence, and outbound external-URL handling. Deep links are accepted only for `3ook.com` and subdomains; URL normalization always enforces `app=1`.
 9. **`services/app-bound-domains.js`** + **`plugins/withAppBoundDomains.js`** — Single source of truth for iOS `WKAppBoundDomains` shared by runtime checks and the config plugin.
-10. **`modules/audio-interruption`** + **`modules/battery-optimization`** — Local Expo native modules autolinked via `package.json#expo.autolinking.nativeModulesDir = "modules"`. iOS audio session interruption hooks; Android battery-optimization-exemption prompt.
+10. **`modules/audio-interruption`** + **`modules/battery-optimization`** + **`modules/webview-cache`** + **`modules/adservices-attribution`** — Local Expo native modules autolinked via `package.json#expo.autolinking.nativeModulesDir = "modules"`. iOS audio session interruption hooks; Android battery-optimization-exemption prompt; iOS WKWebView cache clearing; iOS `AAAttribution` token fetch.
+11. **`services/install-attribution.native.ts`** — Install attribution, one path per platform, both feeding the same `InstallAttribution` shape. Android reads the Play Install Referrer; iOS delegates to `services/adservices-attribution.native.ts`, which exchanges the AdServices token with Apple on-device and maps the response onto the existing `utm_*` keys (`utm_source=apple_ads`, `utm_campaign=campaignId`, `utm_term=keywordId`) so super properties, the bridge, and RevenueCat's `$campaign`/`$mediaSource` mirror all work unchanged. Raw `apple_ads_*` ids ride the capture event only, never super properties. Shared allowlist and sanitizer live in `services/attribution-keys.ts`. Each platform owns a separate marker file in `Paths.document`; the iOS one is a resumable state machine (retries 3×/launch at 5s, budget 12 HTTP-answered attempts, hard stop at the 24h token TTL) and Apple's mock payload (`campaignId` `1234567890`) is filtered out. Result is exposed to web as `window.__nativeBridge.installAttribution`, not a bridge message.
+12. **`services/iap-bridge.native.ts`** — RevenueCat (`react-native-purchases`) in-app purchases for the Plus subscription. `configureIAP()` runs once on start; `wrapIdentityForIAP` hooks `Purchases.logIn/logOut` into the `identifyUser`/`resetUser` identity events so the RevenueCat `appUserID` equals the backend internal user id (`likerId`, from the identity payload's `likerId` field) — the same id the RevenueCat→backend webhook resolves against. Keys come from `app.config.ts` `extra.revenueCat` (`REVENUECAT_IOS_API_KEY` / `REVENUECAT_ANDROID_API_KEY`); the `iap` capability is advertised only when a platform key is present. Entitlement truth lives on the backend (RevenueCat→backend webhook flips `isLikerPlus`), so the bridge only reports purchase results. `configureIAP()` also enables RevenueCat's own Apple Ads attribution collection (iOS physical devices only — the call hangs on Simulator), which is independent of the PostHog path in item 11.
 
 ### Key patterns
 
@@ -47,11 +49,17 @@ The web app itself lives in a separate repo (`liker-land-v3`, a Nuxt 3 PWA). Thi
 
 ### Message protocol
 
-Web → Native messages are JSON with `type` and payload fields. Audio types: `load`, `pause`, `resume`, `stop`, `skipTo`, `setRate`, `seekTo`. Other bridges add their own types (e.g. identity sync, Intercom updates, push-permission requests, downloads). Native → Web events are sent as `CustomEvent` from injected JS — `nativeAudioEvent` for audio (`playbackState`, `trackChanged`, `queueEnded`) and `nativeBridgeEvent` for everything else.
+Web → Native messages are JSON with `type` and payload fields. Audio types: `load`, `pause`, `resume`, `stop`, `skipTo`, `setRate`, `seekTo`, `clearNativeCaches` (drops app-managed content caches — currently the on-disk TTS segment cache; sent by the web's clear-caches flow). IAP types: `iapPurchase` (`{ period, likerId }` — `likerId` is the backend internal user id, used as the RevenueCat `app_user_id`, NOT the evmWallet), `iapRestore` (`{ likerId }` — required for the same reason: a restore under an anonymous id can't be webhook-resolved), `iapGetOfferings`, `iapManageSubscription` (opens the native App Store/Play subscription-management UI via `Purchases.showManageSubscriptions()`; the web routes only store-owned subscribers here, Stripe subscribers go to the Stripe portal). Other bridges add their own types (e.g. identity sync, Intercom updates, push-permission requests, downloads). Native → Web events are sent as `CustomEvent` from injected JS — `nativeAudioEvent` for audio (`playbackState`, `trackChanged`, `queueEnded`) and `nativeBridgeEvent` for everything else (IAP: `iapPurchaseResult`, `iapRestoreResult`, `iapOfferings`, `iapManageResult`).
 
 ### Observability
 
 Sentry (`@sentry/react-native`), Firebase Analytics, and PostHog (`services/posthog.ts`) are wired up. For PostHog details, refer to the code/config in this repo rather than hard-coded account metadata.
+
+Native shell events go through `trackEvent` (bare name in, `app_` prefix applied unconditionally). `app_webview_content_loaded` fires once per launch on the first successful WebView load — the native-person counterpart to `Application Installed`, so install→content converts without depending on native↔WebView identity stitching (pre-login the two SDKs are separate PostHog persons by design).
+
+## Code Conventions
+
+- Comments — keep concise, at most 3 lines. Avoid breaking lines mid-sentence; break at punctuation when needed.
 
 ## Commit Messages
 

@@ -2,9 +2,20 @@ import type { AnalyticsIdentifyTraits, AnalyticsProperties } from './analytics';
 
 export function trackEvent(_event: string, _properties?: AnalyticsProperties): void {}
 
+export function registerSuperProperties(_properties: AnalyticsProperties): void {}
+
 export async function identify(
   _userId: string,
   _traits: AnalyticsIdentifyTraits,
 ): Promise<void> {}
 
 export async function resetIdentity(): Promise<void> {}
+
+export function watchFeatureFlag(
+  _key: string,
+  _onChange: (enabled: boolean | undefined) => void,
+): void {}
+
+export async function getFirebaseAppInstanceId(): Promise<string | null> {
+  return null;
+}

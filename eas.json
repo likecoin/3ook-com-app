@@ -7,15 +7,18 @@
     "development": {
       "developmentClient": true,
       "distribution": "internal",
-      "cache": { "key": "21bf2ed-crashlytics" }
+      "node": "24.10.0",
+      "cache": { "key": "no-precompiled-modules-2" }
     },
     "preview": {
       "distribution": "internal",
-      "cache": { "key": "21bf2ed-crashlytics" }
+      "node": "24.10.0",
+      "cache": { "key": "no-precompiled-modules-2" }
     },
     "production": {
       "autoIncrement": true,
-      "cache": { "key": "21bf2ed-crashlytics" }
+      "node": "24.10.0",
+      "cache": { "key": "no-precompiled-modules-2" }
     }
   },
   "submit": {

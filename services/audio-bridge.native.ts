@@ -1,3 +1,4 @@
+import NetInfo from '@react-native-community/netinfo';
 import CookieManager from '@preeternal/react-native-cookie-manager';
 import {
   createAudioPlayer,
@@ -15,7 +16,16 @@ import {
 } from '../modules/audio-interruption';
 
 import { trackEvent } from './analytics';
+import {
+  clearAudioCache,
+  ensureCachedAudio,
+  evictCachedAudio,
+  getCachedAudioUri,
+  isAudioCacheEnabled,
+  normalizeUrl,
+} from './audio-cache';
 import type { SendToWebView, BridgeHandlerMap } from './bridge-dispatcher';
+import { armStoreReview, recordListening, setAudioActive } from './store-review';
 
 interface TrackInfo {
   index: number;
@@ -44,16 +54,35 @@ interface QueueTrack {
 
 type PreloadState = 'hit' | 'miss' | 'fresh';
 
+// Whether a segment was already on disk. Reported on audio events so a cache
+// serving bad files shows up as a hit-skewed stall rate.
+type CacheState = 'hit' | 'miss';
+
+// Which call hit a deactivated audio session. Reported so a session that never
+// recovers is distinguishable from a plain network stall.
+type SessionRetryStage = 'player_activation' | 'stuck_retry' | 'resume' | 'interruption_resume';
+
 let playerA: AudioPlayer | null = null;
 let playerB: AudioPlayer | null = null;
 let activeSlot: 'A' | 'B' = 'A';
-const preload = { readyIndex: -1, loadingIndex: -1, resetCount: 0 };
+// downloadingIndex covers the window before the idle player has the source.
+// Deliberately NOT read by handleSkipTo: the idle player still holds the
+// previous segment then, so counting it a preload hit would play wrong audio.
+const preload = { readyIndex: -1, loadingIndex: -1, downloadingIndex: -1, resetCount: 0 };
 let idleSub: { remove(): void } | null = null;
 
 let queue: QueueTrack[] = [];
 let currentIndex = -1;
 let currentRate = 1;
 let lastFinishTime = 0;
+
+// Minimum listening within one load before finishing the queue counts as
+// "finished a book" for the review prompt. Rejects skipping to the last
+// segment, resuming near the end, and short samples.
+const MIN_SESSION_LISTENED_MS = 10 * 60 * 1000;
+const MAX_LISTEN_CHUNK_MS = 6 * 60 * 60 * 1000;
+let playingSince = 0;
+let sessionListenedMs = 0;
 let loadPromise: Promise<void> = Promise.resolve();
 let sessionReleasePromise: Promise<void> | null = null;
 let notifyWebView: SendToWebView | null = null;
@@ -63,21 +92,53 @@ let lastSentState = '';
 // Longer than web player's 5s because iOS uses blocking=1 URLs where the
 // server generates the full TTS audio before responding.
 const STUCK_TIMEOUT_MS = 15000;
+// How often each player emits playbackStatusUpdate (expo-audio default: 500ms).
+// With two persistent players that polling is a steady background CPU/battery
+// cost; 1000ms halves it. onStatus only needs coarse state transitions, and
+// gapless auto-advance rides the separate AVPlayerItem end notification
+// (didJustFinish), not this interval.
+const STATUS_UPDATE_INTERVAL_MS = 1000;
 let active = false;
 let stuckTimer: ReturnType<typeof setTimeout> | null = null;
 let stuckRetried = false;
 let errored = false;
 
-// TODO: Remove this once the blocking param is no longer used in the web app.
-// This is to support streaming without breaking older versions of the app.
-function stripBlockingParam(url: string): string {
-  try {
-    const u = new URL(url);
-    u.searchParams.delete('blocking');
-    return u.toString();
-  } catch {
-    return url;
-  }
+// Connectivity at the moment an audio event fires. Offline replay is the whole
+// point of the segment cache, so every audio event carries it — otherwise there
+// is no way to tell a cache hit that saved a round trip from one that saved a
+// failure. NetInfo reports isConnected as boolean | null; treat unknown as
+// online, matching useWebViewRecovery.
+let isOnline = true;
+
+// Set when a track's source is handed to a player, consumed when that track
+// first reports playing. The gap is what the listener actually waits through,
+// which is the metric the cache exists to move — preload_state alone is binary
+// and cannot separate a 200ms miss from a 4s one.
+let pendingStart: {
+  index: number;
+  at: number;
+  preloadState: PreloadState;
+  cacheState: CacheState;
+} | null = null;
+
+function cacheStateFor(track: QueueTrack): CacheState {
+  return getCachedAudioUri(track.uri) ? 'hit' : 'miss';
+}
+
+type PlayerSource = { uri: string; headers?: Record<string, string> };
+
+function streamSource(track: QueueTrack): PlayerSource {
+  return { uri: track.uri, headers: track.headers };
+}
+
+// Play from disk when the segment is already cached, else stream. Read-only:
+// the cache is populated by preloadNext alone, never by a segment we are about
+// to play. Mirroring while streaming the same segment fetched it twice and put
+// the mirror in bandwidth contention with the playback it was mirroring.
+// Sync — the lookup is a filesystem stat, cheap enough for the playback path.
+function playbackSource(track: QueueTrack): PlayerSource {
+  const cachedUri = getCachedAudioUri(track.uri);
+  return cachedUri ? { uri: cachedUri } : streamSource(track);
 }
 
 function getActivePlayer(): AudioPlayer | null {
@@ -95,6 +156,7 @@ function swapSlots(): void {
 function resetIdle(): void {
   preload.readyIndex = -1;
   preload.loadingIndex = -1;
+  preload.downloadingIndex = -1;
   preload.resetCount += 1;
   idleSub?.remove();
   idleSub = null;
@@ -103,25 +165,56 @@ function resetIdle(): void {
 function preloadNext(): void {
   const nextIndex = currentIndex + 1;
   if (nextIndex >= queue.length) return;
-  if (preload.loadingIndex === nextIndex || preload.readyIndex === nextIndex) return;
+  if (
+    preload.loadingIndex === nextIndex ||
+    preload.readyIndex === nextIndex ||
+    preload.downloadingIndex === nextIndex
+  ) {
+    return;
+  }
 
   resetIdle();
 
   const idle = getIdlePlayer();
   if (!idle) return;
 
-  preload.loadingIndex = nextIndex;
   const track = queue[nextIndex];
   idle.pause();
-  idle.replace({ uri: track.uri, headers: track.headers });
+
+  const cachedUri = getCachedAudioUri(track.uri);
+  if (cachedUri) {
+    startIdleLoad(idle, { uri: cachedUri }, nextIndex);
+    return;
+  }
+
+  // Preload is the only path that populates the cache: download the segment,
+  // then hand the idle player the local file. The previous segment's playback
+  // is the runway, so waiting for a complete file costs nothing that streaming
+  // into the idle player would have saved; on failure we stream as before.
+  // resetCount is captured after resetIdle() so a later reset invalidates this
+  // continuation.
+  const startResetCount = preload.resetCount;
+  preload.downloadingIndex = nextIndex;
+  void ensureCachedAudio(track.uri, track.headers).then((localUri) => {
+    if (startResetCount !== preload.resetCount) return;
+    preload.downloadingIndex = -1;
+    // Re-read: the idle slot may have flipped since the download started.
+    const target = getIdlePlayer();
+    if (!target) return;
+    startIdleLoad(target, localUri ? { uri: localUri } : streamSource(track), nextIndex);
+  });
+}
+
+// After a swap the idle player still reports isLoaded from its old track.
+// Wait until we see a buffering/unloaded state (confirming the new source
+// started loading) before accepting isLoaded as the preload being ready.
+// resetCount guards against a late-firing status event racing resetIdle().
+function startIdleLoad(idle: AudioPlayer, source: PlayerSource, nextIndex: number): void {
+  const startResetCount = preload.resetCount;
+  preload.loadingIndex = nextIndex;
+  idle.replace(source);
   idle.setPlaybackRate(currentRate);
 
-  // After a swap the idle player still reports isLoaded from its old track.
-  // Wait until we see a buffering/unloaded state (confirming the new source
-  // started loading) before accepting isLoaded as the preload being ready.
-  // The resetCount guards against stale writes if resetIdle() races
-  // with a late-firing status event.
-  const startResetCount = preload.resetCount;
   let sawLoading = false;
   idleSub = idle.addListener('playbackStatusUpdate', (status) => {
     if (startResetCount !== preload.resetCount) return;
@@ -145,10 +238,10 @@ function getOrCreatePlayers(): AudioPlayer {
   // producing audible gaps and clicks between segments. handleStop() must
   // explicitly call setIsAudioActiveAsync(false) to release the session.
   if (!playerA) {
-    playerA = createAudioPlayer(null, { keepAudioSessionActive: true });
+    playerA = createAudioPlayer(null, { keepAudioSessionActive: true, updateInterval: STATUS_UPDATE_INTERVAL_MS });
   }
   if (!playerB) {
-    playerB = createAudioPlayer(null, { keepAudioSessionActive: true });
+    playerB = createAudioPlayer(null, { keepAudioSessionActive: true, updateInterval: STATUS_UPDATE_INTERVAL_MS });
   }
   return getActivePlayer()!;
 }
@@ -173,17 +266,71 @@ function armStuckTimer(): void {
     stuckRetried = true;
     const p = getActivePlayer();
     if (!p) return;
-    // Non-disruptive retry: just call play() instead of replace(),
-    // so we don't nuke a nearly-ready buffer on slow connections.
-    p.play();
+    trackEvent('audio_stuck_retry', {
+      current_index: currentIndex,
+      // Whether the segment that froze was playing from disk. A cache that
+      // serves bad files would show up here as a hit-skewed stall rate.
+      cache_state: queue[currentIndex] ? cacheStateFor(queue[currentIndex]) : 'miss',
+      is_online: isOnline,
+    });
+    // Player never buffered (silently-failed source, the common mid-queue
+    // stuck case): re-issue the source to force a fresh fetch. If it IS
+    // mid-buffer, the bare play() below avoids nuking a nearly-ready buffer.
+    const track = queue[currentIndex];
+    if (track && !p.isLoaded && !p.isBuffering) {
+      // Pause before replace so iOS doesn't schedule its own auto-resume
+      // that races the play() below and mis-binds didJustFinish (see playTrack).
+      p.pause();
+      // Evict any cached copy (it may be corrupt) and stream directly, so the
+      // retry cannot replay the same local file that just froze.
+      evictCachedAudio(track.uri);
+      p.replace(streamSource(track));
+      p.setPlaybackRate(currentRate);
+    }
+    withSessionRetry('stuck_retry', p, () => p.play());
     stuckTimer = setTimeout(() => {
       stuckTimer = null;
       if (lastSentState === 'playing' || !active || errored) return;
       console.warn('Audio stuck — retry failed');
       errored = true;
+      trackEvent('audio_stuck_failed', { current_index: currentIndex, is_online: isOnline });
       notifyWebView?.({ type: 'error', message: 'Playback stuck' });
     }, STUCK_TIMEOUT_MS);
   }, STUCK_TIMEOUT_MS);
+}
+
+// Wait for any pending release (as doLoad does), re-assert the session, then
+// run once more if playback is still wanted. `p` cancels the retry if the queue
+// swapped slots meanwhile; pass null to resolve the active player at retry time.
+function reassertSession(stage: SessionRetryStage, p: AudioPlayer | null, run: () => void): void {
+  Promise.resolve(sessionReleasePromise)
+    // A stop mid-await wins — reactivating would hold the session with nothing
+    // playing, ducking other apps under interruptionMode 'doNotMix'.
+    .then(() => (active && !errored ? setIsAudioActiveAsync(true) : null))
+    .then(() => {
+      if (!active || errored) return;
+      if (p && getActivePlayer() !== p) return;
+      run();
+    })
+    .catch((err) => {
+      console.warn(`${stage} failed after session retry:`, err);
+      trackEvent('audio_session_retry_failed', {
+        stage,
+        current_index: currentIndex,
+        is_online: isOnline,
+      });
+    });
+}
+
+// Only play() activates the AVAudioSession, and it throws synchronously when
+// iOS has left it deactivated. Catch that instead of crashing, then retry once.
+function withSessionRetry(stage: SessionRetryStage, p: AudioPlayer, run: () => void): void {
+  try {
+    run();
+  } catch (e) {
+    console.warn(`${stage} failed — re-asserting audio session:`, e);
+    reassertSession(stage, p, run);
+  }
 }
 
 function activatePlayer(p: AudioPlayer, track: QueueTrack): void {
@@ -193,12 +340,15 @@ function activatePlayer(p: AudioPlayer, track: QueueTrack): void {
     artist: track.artist,
     artworkUrl: track.artworkUrl,
   });
-  p.play();
+  withSessionRetry('player_activation', p, () => p.play());
 }
 
 function playTrack(p: AudioPlayer, track: QueueTrack): void {
   resetRecoveryState();
 
+  // Writes lastSentState directly, so stand the listening clock down here too —
+  // otherwise the buffering gap before each segment counts as listening.
+  updateListening(false);
   lastSentState = 'buffering';
   notifyWebView?.({ type: 'playbackState', state: 'buffering' });
 
@@ -208,7 +358,7 @@ function playTrack(p: AudioPlayer, track: QueueTrack): void {
   // addPlaybackEndNotification can register on the wrong AVPlayerItem —
   // causing didJustFinish to never fire.
   p.pause();
-  p.replace({ uri: track.uri, headers: track.headers });
+  p.replace(playbackSource(track));
   activatePlayer(p, track);
   armStuckTimer();
 }
@@ -245,12 +395,43 @@ export function setupPlayer(): Promise<void> {
   return setupDone;
 }
 
+// Accrue wall-clock spent actually playing, for the store-review engagement
+// gate. Driven off the real player status rather than the `active` flag, since
+// a lock-screen pause goes straight to the native player without calling
+// handlePause(). Must be called from every lastSentState writer.
+function updateListening(isPlaying: boolean): void {
+  if (playingSince) {
+    const now = Date.now();
+    const elapsed = now - playingSince;
+    // A clock change or suspended timer, not listening. Dropped from both
+    // counters so the session and lifetime totals can't disagree.
+    if (elapsed > 0 && elapsed <= MAX_LISTEN_CHUNK_MS) {
+      sessionListenedMs += elapsed;
+      recordListening(elapsed);
+    }
+    playingSince = isPlaying ? now : 0;
+  } else if (isPlaying) {
+    playingSince = Date.now();
+  }
+  setAudioActive(isPlaying);
+}
+
 export function handleLoad(msg: LoadMessage): Promise<void> {
   loadPromise = loadPromise.then(() => doLoad(msg)).catch(() => doLoad(msg));
   return loadPromise;
 }
 
 async function doLoad(msg: LoadMessage): Promise<void> {
+  // Validate before any side effect: activating the audio session (which ducks
+  // other apps under doNotMix) for a malformed message would leave it held
+  // forever, since handleStop is the only release path.
+  if (!msg.tracks.length || msg.startIndex < 0 || msg.startIndex >= msg.tracks.length) return;
+
+  // The cookie read is independent of the session awaits below; start it now
+  // so it overlaps them instead of adding to tap-to-audio latency. On failure
+  // proceed without cookies.
+  const cookiesPromise = CookieManager.get(msg.tracks[0].url).catch(() => null);
+
   // Wait for any pending session release from a prior handleStop. Otherwise
   // setIsAudioActiveAsync(false) (background queue) can land after play()'s
   // synchronous activateSession(), leaving the session deactivated.
@@ -272,26 +453,21 @@ async function doLoad(msg: LoadMessage): Promise<void> {
 
   const p = getOrCreatePlayers();
 
-  const cookieUrl = msg.tracks[0]?.url;
-  let cookieHeader = '';
-  if (cookieUrl) {
-    try {
-      const cookies = await CookieManager.get(cookieUrl);
-      cookieHeader = Object.entries(cookies)
+  const cookies = await cookiesPromise;
+  const cookieHeader = cookies
+    ? Object.entries(cookies)
         .map(([name, cookie]) => `${name}=${cookie.value}`)
-        .join('; ');
-    } catch {
-      // Cookies unavailable — proceed without them
-    }
-  }
+        .join('; ')
+    : '';
   const headers = cookieHeader ? { Cookie: cookieHeader } : undefined;
-
-  if (!msg.tracks.length || msg.startIndex < 0 || msg.startIndex >= msg.tracks.length) return;
 
   requestBatteryOptimizationExemption();
 
   queue = msg.tracks.map((t) => ({
-    uri: Platform.OS === 'android' ? stripBlockingParam(t.url) : t.url,
+    // Android streams the non-blocking variant; iOS keeps blocking=1. Older web
+    // builds still send blocking=1, so strip it here rather than relying on the
+    // web to stop.
+    uri: Platform.OS === 'android' ? normalizeUrl(t.url) : t.url,
     headers,
     title: t.title || msg.metadata.bookTitle,
     artist: msg.metadata.authorName,
@@ -302,6 +478,10 @@ async function doLoad(msg: LoadMessage): Promise<void> {
   currentRate = msg.rate;
   lastFinishTime = 0;
   active = true;
+  // New book (or a voice-actor switch, which the web implements as stop → load):
+  // the "finished a book" threshold measures this load only.
+  updateListening(false);
+  sessionListenedMs = 0;
   clearStuckTimer();
   resetIdle();
 
@@ -318,7 +498,18 @@ async function doLoad(msg: LoadMessage): Promise<void> {
     track_count: queue.length,
     start_index: currentIndex,
     rate: currentRate,
+    is_online: isOnline,
+    // Whether the segment cache was live for this session. cache_state alone
+    // cannot say: it reads 'miss' both when the cache is off and when it is on
+    // but never populating, which is how a dead cache went unnoticed.
+    cache_enabled: isAudioCacheEnabled(),
   });
+  pendingStart = {
+    index: currentIndex,
+    at: Date.now(),
+    preloadState: 'fresh',
+    cacheState: cacheStateFor(queue[currentIndex]),
+  };
   playTrack(p, queue[currentIndex]);
 }
 
@@ -332,7 +523,8 @@ export function handleResume(): void {
   active = true;
   errored = false;
   stuckRetried = false;
-  getActivePlayer()?.play();
+  const p = getActivePlayer();
+  if (p) withSessionRetry('resume', p, () => p.play());
 }
 
 export function handleStop(): void {
@@ -340,6 +532,7 @@ export function handleStop(): void {
     trackEvent('audio_session_stopped', { last_index: currentIndex });
   }
   active = false;
+  updateListening(false);
   resetRecoveryState();
   clearStuckTimer();
   // Skip replace(null) — iOS expo-audio cannot cast null to AudioSource.
@@ -381,6 +574,10 @@ export function handleSkipTo(index: number, { resetFinishGuard = true } = {}): v
   const idle = getIdlePlayer();
   const idleHasThisTrack = preload.readyIndex === index || preload.loadingIndex === index;
   const preloadState: PreloadState = idleHasThisTrack && idle?.isLoaded ? 'hit' : 'miss';
+  // Read before the source is swapped in, so it reports whether the segment was
+  // already on disk when we advanced to it rather than after any later write.
+  const cacheState = cacheStateFor(queue[index]);
+  pendingStart = { index, at: Date.now(), preloadState, cacheState };
 
   if (preloadState === 'hit') {
     swapToIdle(queue[currentIndex]);
@@ -402,6 +599,9 @@ export function handleSkipTo(index: number, { resetFinishGuard = true } = {}): v
     to_index: currentIndex,
     preload_state: preloadState,
     auto_advance: !resetFinishGuard,
+    // Whether this segment was already on disk when we advanced to it.
+    cache_state: cacheState,
+    is_online: isOnline,
   });
   preloadNext();
 }
@@ -433,6 +633,10 @@ export function getAudioHandlers(): BridgeHandlerMap {
         return handleSeekTo(msg.position);
       }
     },
+    // App-managed content caches — currently just TTS audio; hook future
+    // content caches in here. The WebView HTTP/SW cache stays separate
+    // (clearWebViewCache — it reloads); logout also clears via resetUser.
+    clearNativeCaches: () => clearAudioCache(),
   };
 }
 
@@ -449,7 +653,21 @@ export function registerEventListeners(sendToWebView: SendToWebView) {
     if (status.playbackState === 'failed') {
       errored = true;
       clearStuckTimer();
-      trackEvent('audio_playback_failed', { current_index: currentIndex });
+      // Evict any cached copy of the failing track — a corrupt file would
+      // otherwise fail identically on every future replay of this segment.
+      const failedTrack = queue[currentIndex];
+      // Read before evicting, or the eviction below makes every failure a miss.
+      const failedCacheState = failedTrack ? cacheStateFor(failedTrack) : 'miss';
+      if (failedTrack) evictCachedAudio(failedTrack.uri);
+      // 'failed' is sticky and returns before the transition below, so the
+      // listening clock would otherwise run until the next load — crediting
+      // hours of silence and pinning audioActive true.
+      updateListening(false);
+      trackEvent('audio_playback_failed', {
+        current_index: currentIndex,
+        cache_state: failedCacheState,
+        is_online: isOnline,
+      });
       notifyWebView?.({ type: 'error', message: 'Playback failed' });
       return;
     }
@@ -464,6 +682,7 @@ export function registerEventListeners(sendToWebView: SendToWebView) {
       state = 'paused';
     }
     if (state !== lastSentState) {
+      updateListening(state === 'playing');
       lastSentState = state;
       notifyWebView?.({ type: 'playbackState', state });
     }
@@ -472,10 +691,29 @@ export function registerEventListeners(sendToWebView: SendToWebView) {
     if (state === 'playing') {
       errored = false;
       clearStuckTimer();
+      // Only fires for a track that was just started, so a resume from pause
+      // does not report a load. A segment that never reaches playing leaves its
+      // pendingStart to be overwritten — the missing event is the stall signal.
+      if (pendingStart && pendingStart.index === currentIndex) {
+        trackEvent('audio_track_playing', {
+          index: currentIndex,
+          load_ms: Date.now() - pendingStart.at,
+          preload_state: pendingStart.preloadState,
+          cache_state: pendingStart.cacheState,
+          stuck_retried: stuckRetried,
+          is_online: isOnline,
+        });
+        pendingStart = null;
+      }
     }
 
     // Trigger preload once playback starts
-    if (state === 'playing' && preload.readyIndex < 0 && preload.loadingIndex < 0) {
+    if (
+      state === 'playing' &&
+      preload.readyIndex < 0 &&
+      preload.loadingIndex < 0 &&
+      preload.downloadingIndex < 0
+    ) {
       preloadNext();
     }
 
@@ -486,8 +724,14 @@ export function registerEventListeners(sendToWebView: SendToWebView) {
       lastFinishTime = now;
 
       if (currentIndex >= queue.length - 1) {
+        // Flush the final stretch and stand the clock down before arming: the
+        // review gate refuses to prompt while audio is playing.
+        updateListening(false);
         trackEvent('audio_queue_ended', { track_count: queue.length });
         notifyWebView?.({ type: 'queueEnded' });
+        // Usually fires with the screen locked, so this parks the prompt for the
+        // next foreground rather than showing it to nobody.
+        if (sessionListenedMs >= MIN_SESSION_LISTENED_MS) armStoreReview('book_finished');
       } else {
         // Auto-advance natively because WebView JS execution is suspended
         // when the app is backgrounded or the screen is locked, so it
@@ -495,6 +739,19 @@ export function registerEventListeners(sendToWebView: SendToWebView) {
         handleSkipTo(currentIndex + 1, { resetFinishGuard: false });
       }
     }
+  }
+
+  // Connectivity for the is_online property on audio events. No seed fetch
+  // needed: NetInfo delivers the latest state to a new handler immediately.
+  // Guarded like useWebViewRecovery: addEventListener throws when the RNCNetInfo
+  // native module is missing, and that must not take the whole bridge down.
+  let netInfoSub: (() => void) | null = null;
+  try {
+    netInfoSub = NetInfo.addEventListener((netState) => {
+      isOnline = netState.isConnected !== false;
+    });
+  } catch {
+    // Native module absent — events carry the default rather than crashing.
   }
 
   const subA = playerA!.addListener('playbackStatusUpdate', (status) => onStatus(playerA!, status));
@@ -516,7 +773,10 @@ export function registerEventListeners(sendToWebView: SendToWebView) {
   });
   const interruptionEndedSub = addInterruptionEndedListener((_event) => {
     if (wasPlayingBeforeInterruption && active && !errored) {
-      getActivePlayer()?.play();
+      // iOS can leave the session deactivated after an interruption; a bare
+      // play() then throws "Session activation failed". Re-assert before
+      // resuming rather than catching the throw as the other call sites do.
+      reassertSession('interruption_resume', null, () => getActivePlayer()?.play());
     }
     wasPlayingBeforeInterruption = false;
   });
@@ -536,12 +796,14 @@ export function registerEventListeners(sendToWebView: SendToWebView) {
   return () => {
     subA.remove();
     subB.remove();
+    netInfoSub?.();
     interruptionBeganSub.remove();
     interruptionEndedSub.remove();
     appStateSub.remove();
     clearStuckTimer();
     resetIdle();
     active = false;
+    updateListening(false);
     resetRecoveryState();
     notifyWebView = null;
   };

@@ -45,17 +45,30 @@ export function trackEvent(event: string, properties?: AnalyticsProperties): voi
     .catch((e) => console.warn('[analytics] firebase logEvent failed', e));
 }
 
+// Attach durable properties (e.g. install attribution) to every subsequent
+// PostHog event on this device. Firebase collects install attribution natively
+// via GA4, so this targets PostHog only.
+export function registerSuperProperties(properties: AnalyticsProperties): void {
+  try {
+    // Cast through unknown for posthog-react-native's stricter type, as trackEvent does.
+    posthog.register(properties as unknown as Record<string, string | number | boolean | null>);
+  } catch (e) {
+    console.warn('[analytics] posthog.register failed', e);
+  }
+}
+
 export async function identify(
   userId: string,
   traits: AnalyticsIdentifyTraits,
 ): Promise<void> {
-  const { email, displayName, isLikerPlus, loginMethod, locale, gaUserId } = traits;
+  const { email, displayName, isLikerPlus, likerPlusTier, loginMethod, locale, gaUserId } = traits;
 
   try {
     posthog.identify(userId, {
       email: email ?? null,
       name: displayName ?? null,
       is_liker_plus: !!isLikerPlus,
+      liker_plus_tier: likerPlusTier ?? null,
       login_method: loginMethod ?? null,
       locale: locale ?? null,
     });
@@ -65,6 +78,7 @@ export async function identify(
 
   const userProps = {
     is_liker_plus: String(!!isLikerPlus),
+    liker_plus_tier: likerPlusTier ?? '',
     login_method: loginMethod ?? '',
     locale: locale ?? '',
   };
@@ -80,9 +94,58 @@ export async function identify(
   await Promise.all(tasks);
 }
 
+// Resolve a flag to on / off / unresolved. Not isFeatureEnabled/getFeatureFlag:
+// both fall back to false for a flag that does not exist, so a never-created one
+// reads as deliberately off and silently disables whatever it guards. This keeps
+// the $feature_flag_called event they send; `enabled` is true for any variant.
+function readFlag(key: string): boolean | undefined {
+  return posthog.getFeatureFlagResult(key)?.enabled;
+}
+
+// Watch a boolean feature flag. PostHog persists the last flags response, so on
+// any launch after the first the seed read already has the real value; on a
+// cold install it is undefined until the network response lands.
+export function watchFeatureFlag(
+  key: string,
+  onChange: (enabled: boolean | undefined) => void,
+): void {
+  // Subscribe before seeding: if the seed read throws, the caller must still
+  // get later updates, or a kill-switch would be dead for the whole process.
+  // Re-read inside the callback rather than using its argument — onFeatureFlag
+  // reports the raw flag, and readFlag applies the missing-vs-off rule.
+  try {
+    posthog.onFeatureFlag(key, () => onChange(readFlag(key)));
+  } catch (e) {
+    console.warn('[analytics] watchFeatureFlag subscribe failed', e);
+  }
+  try {
+    // onFeatureFlag only fires on a reload, never with the current value.
+    onChange(readFlag(key));
+  } catch (e) {
+    console.warn('[analytics] watchFeatureFlag seed failed', e);
+  }
+}
+
+// Firebase App Instance ID. Exposed so the IAP bridge can mirror it onto
+// RevenueCat's reserved $firebaseAppInstanceId attribute, keeping the firebase
+// SDK dep contained in this module.
+export async function getFirebaseAppInstanceId(): Promise<string | null> {
+  try {
+    return await analytics().getAppInstanceId();
+  } catch (e) {
+    console.warn('[analytics] getAppInstanceId failed', e);
+    return null;
+  }
+}
+
 export async function resetIdentity(): Promise<void> {
   try {
-    posthog.reset();
+    // reset() mints a new anonymous id. Resetting while still anonymous strands
+    // the pre-login events (Application Installed, first opens) on a person no
+    // later identify() can merge, so only reset once we are actually identified.
+    if (posthog.getDistinctId() !== posthog.getAnonymousId()) {
+      posthog.reset();
+    }
   } catch (e) {
     console.warn('[analytics] posthog.reset failed', e);
   }

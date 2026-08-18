@@ -152,7 +152,7 @@ async function ensureSession() {
 // Caller must invoke this inside the serialize() queue: Identity Verification
 // requires the JWT to land before the token attaches, otherwise the token
 // registers against the prior (or guest) session.
-async function registerPushTokenIfPossible() {
+async function registerPushTokenIfPossible(knownToken?: string) {
   const intercom = getLoadedIntercom();
   if (!intercom) return;
   if (!isPushAvailable()) return;
@@ -161,7 +161,14 @@ async function registerPushTokenIfPossible() {
   const { Intercom } = intercom;
   const loggedIn = await safeCall('isUserLoggedIn', () => Intercom.isUserLoggedIn());
   if (!loggedIn) return;
-  const token = await getCurrentDeviceToken();
+  // Prefer the token handed to us by the device-token listener. Calling
+  // getDevicePushTokenAsync() here re-invokes registerForRemoteNotifications,
+  // which re-fires that same listener — so fetching it from the listener path
+  // would spin an infinite registration loop (keychain + APNs churn pegging the
+  // CPU whenever a logged-in user has push granted). Only fall back to a fetch
+  // for eager callers that have no token in hand; that single fetch fires the
+  // listener once, which then re-enters here with the token and dedupes out.
+  const token = knownToken ?? (await getCurrentDeviceToken());
   if (!token) return;
   if (token === lastRegisteredToken) return;
   const tokenChanged = lastRegisteredToken !== null;
@@ -211,9 +218,11 @@ function dispatchPushStatus(send: SendToWebView, status: PushPermissionStatus): 
   send({ type: 'pushPermissionChanged', status });
 }
 
-// Inner dedupe (lastRegisteredToken) makes eager calls cheap.
-function queueTokenRegistration(): void {
-  serialize(() => registerPushTokenIfPossible());
+// Inner dedupe (lastRegisteredToken) makes eager calls cheap. Pass the token
+// through when it came from the device-token listener so registration doesn't
+// re-fetch (and thereby re-trigger the listener — see registerPushTokenIfPossible).
+function queueTokenRegistration(knownToken?: string): void {
+  serialize(() => registerPushTokenIfPossible(knownToken));
 }
 
 function applyPushStatus(send: SendToWebView, status: PushPermissionStatus): void {
@@ -256,24 +265,49 @@ function looksLikeIntercomPush(data: unknown): boolean {
   return 'conversation_id' in d || 'intercom_push_type' in d || 'instance_id' in d;
 }
 
+// Intercom push campaigns with an "open a deep link" / "URI on tap" action
+// carry the destination in the payload's `uri` key. Normally Intercom's native
+// SDK would open it through the OS, but expo-notifications consumes the tap
+// first (see handleIntercomNotificationTap), so we read the URL ourselves.
+// `deeplink`/`deep_link` are defensive fallbacks for payload-shape drift.
+function extractIntercomDeepLink(data: unknown): string | undefined {
+  if (!data || typeof data !== 'object') return undefined;
+  const d = data as Record<string, unknown>;
+  const uri = d.uri ?? d.deeplink ?? d.deep_link;
+  return typeof uri === 'string' && uri.length > 0 ? uri : undefined;
+}
+
 // Tapping a push notification launches the app via getInitialURL and the
 // expo-notifications response listener consumes the tap event before Intercom
 // ever sees it, so the messenger never auto-opens. Detect Intercom pushes
-// ourselves and present the messenger through the serialize queue so the
+// ourselves: a campaign with a deep link routes into the WebView; a
+// conversation push presents the messenger through the serialize queue so the
 // present call orders correctly against any in-flight identifyUser.
-function handleIntercomNotificationTap(data: unknown): void {
+function handleIntercomNotificationTap(
+  data: unknown,
+  onDeepLink: (url: string) => void,
+): void {
   const isIntercom = looksLikeIntercomPush(data);
   const intercomPushType =
     isIntercom && data && typeof data === 'object'
       ? (data as Record<string, unknown>).intercom_push_type
       : undefined;
+  const deepLink = isIntercom ? extractIntercomDeepLink(data) : undefined;
   trackEvent('push_notification_tapped', {
     is_intercom_push: isIntercom,
     intercom_push_type: typeof intercomPushType === 'string' ? intercomPushType : null,
+    has_deep_link: !!deepLink,
   });
   const intercom = getLoadedIntercom();
   if (!intercom) return;
   if (!isIntercom) return;
+  // A deep-link campaign isn't a conversation — presenting the messenger here
+  // is the bug that strands the user on the last-visited URL. Hand the URL to
+  // the WebView navigator (which enforces the 3ook-host allowlist) instead.
+  if (deepLink) {
+    onDeepLink(deepLink);
+    return;
+  }
   const { Intercom } = intercom;
   serialize(async () => {
     await ensureSession();
@@ -411,10 +445,19 @@ export function wrapIdentityHandlers(
         evm_wallet: typeof msg.evmWallet === 'string' ? msg.evmWallet : undefined,
         like_wallet: typeof msg.likeWallet === 'string' ? msg.likeWallet : undefined,
         is_liker_plus: !!msg.isLikerPlus,
+        liker_plus_tier: typeof msg.likerPlusTier === 'string' ? msg.likerPlusTier : undefined,
         login_method: typeof msg.loginMethod === 'string' ? msg.loginMethod : undefined,
         locale: typeof msg.locale === 'string' ? msg.locale : undefined,
       },
     };
+
+    // Validate once for both paths below: an expired/undecodable token fails IV.
+    const incomingExp = getJwtExp(intercomToken);
+    const now = Math.floor(Date.now() / 1000);
+    const jwtUsable =
+      incomingExp !== undefined &&
+      Number.isFinite(incomingExp) &&
+      incomingExp - JWT_EXP_SKEW_S > now;
 
     // loginUserWithUserAttributes re-verifies the JWT and tears down the
     // session on any verification miss, so skip it when the SDK already has
@@ -432,8 +475,12 @@ export function wrapIdentityHandlers(
       incomingKey === currentKey;
 
     if (sameUser) {
-      // updateUser doesn't re-trigger JWT verification, so a stale cached
-      // JWT can't blow up the session here.
+      // SDK restores session identity across launches but not the JWT, so the
+      // messenger fails IV ("Content could not be loaded") until re-set. Unlike
+      // login, setUserJwt re-applies the token without tearing the session down.
+      if (jwtUsable) {
+        await safeCall('setUserJwt', () => Intercom.setUserJwt(intercomToken));
+      }
       await safeCall('updateUser', () => Intercom.updateUser(attrs));
       return;
     }
@@ -441,13 +488,7 @@ export function wrapIdentityHandlers(
     // An expired, undecodable, or malformed token will fail server-side IV
     // check and leave us with no session at all — worse than keeping the
     // prior one. Skip and let web retry with a fresh JWT.
-    const incomingExp = getJwtExp(intercomToken);
-    const now = Math.floor(Date.now() / 1000);
-    if (
-      incomingExp === undefined ||
-      !Number.isFinite(incomingExp) ||
-      incomingExp - JWT_EXP_SKEW_S <= now
-    ) {
+    if (!jwtUsable) {
       console.warn('[intercom] skipping login: JWT unusable', {
         exp: incomingExp,
         now,
@@ -490,7 +531,10 @@ export function wrapIdentityHandlers(
   };
 }
 
-export function registerIntercomEventListeners(send: SendToWebView): () => void {
+export function registerIntercomEventListeners(
+  send: SendToWebView,
+  onDeepLink: (url: string) => void,
+): () => void {
   const intercom = getLoadedIntercom();
   if (!intercom) return () => {};
   const { events } = intercom;
@@ -544,14 +588,16 @@ export function registerIntercomEventListeners(send: SendToWebView): () => void 
   // APNs/FCM rotates tokens occasionally (app restore, FCM key roll); the
   // registration helper gates on session+permission so this is safe to fire
   // eagerly.
-  const unsubToken = addDeviceTokenListener(() => {
-    queueTokenRegistration();
+  const unsubToken = addDeviceTokenListener((token) => {
+    queueTokenRegistration(token);
   });
 
   // expo-notifications buffers the most recent response until a JS listener
   // attaches, so registering here (from useEffect on mount) is early enough to
   // catch cold-launch taps as well as warm-app taps.
-  const unsubResponse = addNotificationResponseListener(handleIntercomNotificationTap);
+  const unsubResponse = addNotificationResponseListener((data) =>
+    handleIntercomNotificationTap(data, onDeepLink)
+  );
 
   // First sync is now driven by WebView onLoadEnd via resyncPushStatusToWeb,
   // which guarantees the web JS context exists to receive the dispatch.
