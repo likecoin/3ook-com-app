@@ -227,5 +227,6 @@ export function useWebViewRecovery({ onRemount }: { onRemount: () => void }) {
     notifyDocumentLost,
     handleWebViewError,
     handleManualRetry,
+    remountWebView,
   };
 }

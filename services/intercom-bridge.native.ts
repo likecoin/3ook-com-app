@@ -1,4 +1,5 @@
 import type { EmitterSubscription } from 'react-native';
+import Constants from 'expo-constants';
 import { AppState, DeviceEventEmitter, NativeEventEmitter, NativeModules, Platform } from 'react-native';
 
 import { trackEvent } from './analytics';
@@ -18,12 +19,17 @@ type IntercomModuleType = typeof import('@intercom/intercom-react-native');
 type IntercomDefault = IntercomModuleType['default'];
 type UserAttributes = import('@intercom/intercom-react-native').UserAttributes;
 
+function isIntercomConfigured(): boolean {
+  return Constants.expoConfig?.extra?.intercomEnabled === true;
+}
+
 // `@intercom/intercom-react-native`'s JS wrapper asserts on NativeModules at
 // module-eval time, so a build without the config plugin would crash on import.
 // Resolve once via gated `require` and degrade to no-ops if the native module
 // isn't linked.
 type LoadedIntercom = { Intercom: IntercomDefault; events: IntercomModuleType['IntercomEvents'] };
 const loadedIntercom: LoadedIntercom | null = (() => {
+  if (!isIntercomConfigured()) return null;
   if (!NativeModules.IntercomModule) return null;
   try {
     // eslint-disable-next-line @typescript-eslint/no-require-imports
@@ -34,9 +40,36 @@ const loadedIntercom: LoadedIntercom | null = (() => {
     return null;
   }
 })();
+let intercomRuntimeDisabled = false;
+let didWarnIntercomRuntimeDisabled = false;
+
+function isIntercomInitializationError(e: unknown): boolean {
+  const message =
+    e instanceof Error
+      ? e.message
+      : e && typeof e === 'object' && 'message' in e
+        ? String((e as { message?: unknown }).message)
+        : String(e);
+  return message.includes('Intercom has been initialized incorrectly');
+}
+
+function disableIntercomRuntime(e: unknown): void {
+  intercomRuntimeDisabled = true;
+  if (didWarnIntercomRuntimeDisabled) return;
+  didWarnIntercomRuntimeDisabled = true;
+  console.warn(
+    '[intercom] disabled: native SDK is linked but not initialized correctly',
+    __DEV__ && e instanceof Error ? { message: e.message } : undefined
+  );
+}
+
+function getLoadedIntercom(): LoadedIntercom | null {
+  if (intercomRuntimeDisabled) return null;
+  return loadedIntercom;
+}
 
 export function isIntercomAvailable(): boolean {
-  return loadedIntercom !== null;
+  return getLoadedIntercom() !== null;
 }
 
 export function isIntercomPushSupported(): boolean {
@@ -67,9 +100,14 @@ function getJwtExp(jwt: string): number | undefined {
 const JWT_EXP_SKEW_S = 30;
 
 async function safeCall<T>(label: string, fn: () => Promise<T>): Promise<T | undefined> {
+  if (intercomRuntimeDisabled) return undefined;
   try {
     return await fn();
   } catch (e) {
+    if (isIntercomInitializationError(e)) {
+      disableIntercomRuntime(e);
+      return undefined;
+    }
     if (__DEV__) {
       // RN's default console formatter truncates the bridge error fields;
       // destructure so Intercom's underlying NSError surfaces in Metro.
@@ -103,8 +141,9 @@ function serialize<T>(fn: () => Promise<T>): Promise<T> {
 // loaded") if no user session exists. Identified users are registered via
 // `identifyUser`; for guests we register an unidentified session on demand.
 async function ensureSession() {
-  if (!loadedIntercom) return;
-  const { Intercom } = loadedIntercom;
+  const intercom = getLoadedIntercom();
+  if (!intercom) return;
+  const { Intercom } = intercom;
   const loggedIn = await safeCall('isUserLoggedIn', () => Intercom.isUserLoggedIn());
   if (loggedIn) return;
   await safeCall('loginUnidentifiedUser', () => Intercom.loginUnidentifiedUser());
@@ -114,11 +153,12 @@ async function ensureSession() {
 // requires the JWT to land before the token attaches, otherwise the token
 // registers against the prior (or guest) session.
 async function registerPushTokenIfPossible(knownToken?: string) {
-  if (!loadedIntercom) return;
+  const intercom = getLoadedIntercom();
+  if (!intercom) return;
   if (!isPushAvailable()) return;
   const status = await readPushStatus();
   if (status !== 'granted') return;
-  const { Intercom } = loadedIntercom;
+  const { Intercom } = intercom;
   const loggedIn = await safeCall('isUserLoggedIn', () => Intercom.isUserLoggedIn());
   if (!loggedIn) return;
   // Prefer the token handed to us by the device-token listener. Calling
@@ -140,6 +180,10 @@ async function registerPushTokenIfPossible(knownToken?: string) {
     lastRegisteredToken = token;
     trackEvent('push_token_registered', { token_changed: tokenChanged });
   } catch (e) {
+    if (isIntercomInitializationError(e)) {
+      disableIntercomRuntime(e);
+      return;
+    }
     console.warn('[intercom] sendTokenToIntercom failed', e);
     trackEvent('push_token_registration_failed');
   }
@@ -254,7 +298,8 @@ function handleIntercomNotificationTap(
     intercom_push_type: typeof intercomPushType === 'string' ? intercomPushType : null,
     has_deep_link: !!deepLink,
   });
-  if (!loadedIntercom) return;
+  const intercom = getLoadedIntercom();
+  if (!intercom) return;
   if (!isIntercom) return;
   // A deep-link campaign isn't a conversation — presenting the messenger here
   // is the bug that strands the user on the last-visited URL. Hand the URL to
@@ -263,7 +308,7 @@ function handleIntercomNotificationTap(
     onDeepLink(deepLink);
     return;
   }
-  const { Intercom } = loadedIntercom;
+  const { Intercom } = intercom;
   serialize(async () => {
     await ensureSession();
     await safeCall('present', () => Intercom.present());
@@ -271,8 +316,9 @@ function handleIntercomNotificationTap(
 }
 
 export function getIntercomHandlers(send: SendToWebView): BridgeHandlerMap {
-  if (!loadedIntercom) return {};
-  const { Intercom } = loadedIntercom;
+  const intercom = getLoadedIntercom();
+  if (!intercom) return {};
+  const { Intercom } = intercom;
 
   return {
     intercomShow: async () => {
@@ -352,8 +398,9 @@ export function wrapIdentityHandlers(
   base: BridgeHandlerMap,
   send: SendToWebView,
 ): BridgeHandlerMap {
-  if (!loadedIntercom) return base;
-  const { Intercom } = loadedIntercom;
+  const intercom = getLoadedIntercom();
+  if (!intercom) return base;
+  const { Intercom } = intercom;
 
   async function intercomIdentify(msg: Record<string, unknown>) {
     const intercomToken =
@@ -417,7 +464,7 @@ export function wrapIdentityHandlers(
     // the same user logged in (covers cold starts where the SDK restored its
     // session from keychain but our module state is fresh).
     const incomingKey = userId ?? email;
-    const current = await safeCall('fetchLoggedInUserAttributes', () =>
+    const current = await safeCall<UserAttributes>('fetchLoggedInUserAttributes', () =>
       Intercom.fetchLoggedInUserAttributes()
     );
     const currentKey = current?.userId ?? current?.email;
@@ -488,8 +535,9 @@ export function registerIntercomEventListeners(
   send: SendToWebView,
   onDeepLink: (url: string) => void,
 ): () => void {
-  if (!loadedIntercom) return () => {};
-  const { events } = loadedIntercom;
+  const intercom = getLoadedIntercom();
+  if (!intercom) return () => {};
+  const { events } = intercom;
 
   let emitter: NativeEventEmitter | typeof DeviceEventEmitter;
   if (Platform.OS === 'ios') {

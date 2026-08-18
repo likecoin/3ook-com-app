@@ -1,3 +1,4 @@
+import CookieManager from '@preeternal/react-native-cookie-manager';
 import * as Application from 'expo-application';
 import * as Linking from 'expo-linking';
 import { useCallback, useEffect, useRef, useState } from 'react';
@@ -6,11 +7,14 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import WebView, { type WebViewMessageEvent } from 'react-native-webview';
 import type {
   ShouldStartLoadRequest,
+  WebViewHttpErrorEvent,
   WebViewNavigation,
+  WebViewRenderProcessGoneEvent,
 } from 'react-native-webview/lib/WebViewTypes';
 
 import packageJson from '../package.json';
 import { LoadErrorOverlay } from '../components/LoadErrorOverlay';
+import { MetaMaskLoginButton } from '../components/MetaMaskLoginButton';
 import { useDeepLinkRouting } from '../hooks/useDeepLinkRouting';
 import { useWebViewRecovery } from '../hooks/useWebViewRecovery';
 import { trackEvent } from '../services/analytics';
@@ -88,6 +92,152 @@ const NATIVE_BRIDGE_FEATURES: readonly string[] = [
   'clearNativeCaches',
 ];
 const NATIVE_BRIDGE_BOOTSTRAP = `(function(){try{window.__nativeBridge=window.__nativeBridge||{};window.__nativeBridge.features=${JSON.stringify(NATIVE_BRIDGE_FEATURES)};}catch(e){}})();true;`;
+const WEBVIEW_DEBUG_BOOTSTRAP = __DEV__
+  ? `(function(){
+      function sanitizeUrl(value){
+        try {
+          var u = new URL(String(value), window.location.href);
+          return u.origin + u.pathname;
+        } catch (e) {
+          return undefined;
+        }
+      }
+      function stringify(value){
+        try {
+          if (value && value.message) return String(value.message);
+          return String(value);
+        } catch (e) {
+          return '[unprintable]';
+        }
+      }
+      function post(payload){
+        try {
+          if (!window.ReactNativeWebView) return;
+          window.ReactNativeWebView.postMessage(JSON.stringify(Object.assign({
+            type: '__nativeDebugLog',
+            page: sanitizeUrl(window.location.href)
+          }, payload)));
+        } catch (e) {}
+      }
+      window.addEventListener('error', function(event){
+        post({
+          level: 'error',
+          source: 'window.error',
+          message: stringify(event.message || event.error).slice(0, 500),
+          filename: sanitizeUrl(event.filename),
+          line: event.lineno || null,
+          column: event.colno || null
+        });
+      });
+      window.addEventListener('unhandledrejection', function(event){
+        post({
+          level: 'error',
+          source: 'unhandledrejection',
+          message: stringify(event.reason).slice(0, 500)
+        });
+      });
+      if (typeof window.fetch === 'function') {
+        var originalFetch = window.fetch;
+        window.fetch = function(input, init){
+          var requestUrl = typeof input === 'string' ? input : input && input.url;
+          return originalFetch.apply(this, arguments).then(function(response){
+            if (response && response.status >= 400) {
+              post({
+                level: 'error',
+                source: 'fetch',
+                message: 'HTTP ' + response.status,
+                url: sanitizeUrl(response.url || requestUrl)
+              });
+            }
+            return response;
+          }).catch(function(error){
+            post({
+              level: 'error',
+              source: 'fetch',
+              message: stringify(error).slice(0, 500),
+              url: sanitizeUrl(requestUrl)
+            });
+            throw error;
+          });
+        };
+      }
+      if (typeof window.XMLHttpRequest === 'function') {
+        var OriginalXHR = window.XMLHttpRequest;
+        window.XMLHttpRequest = function(){
+          var xhr = new OriginalXHR();
+          var requestUrl;
+          var originalOpen = xhr.open;
+          xhr.open = function(method, url){
+            requestUrl = url;
+            return originalOpen.apply(xhr, arguments);
+          };
+          xhr.addEventListener('loadend', function(){
+            if (xhr.status >= 400) {
+              post({
+                level: 'error',
+                source: 'xhr',
+                message: 'HTTP ' + xhr.status,
+                url: sanitizeUrl(xhr.responseURL || requestUrl)
+              });
+            }
+          });
+          xhr.addEventListener('error', function(){
+            post({
+              level: 'error',
+              source: 'xhr',
+              message: 'Network error',
+              url: sanitizeUrl(requestUrl)
+            });
+          });
+          return xhr;
+        };
+      }
+      var originalError = console.error;
+      console.error = function(){
+        post({
+          level: 'error',
+          source: 'console.error',
+          message: Array.prototype.slice.call(arguments).map(stringify).join(' ').slice(0, 500)
+        });
+        return originalError.apply(console, arguments);
+      };
+    })();true;`
+  : 'true;';
+
+function sanitizeURLForLog(rawUrl: string | undefined): string | undefined {
+  if (!rawUrl) return undefined;
+  try {
+    const u = new URL(rawUrl);
+    return `${u.origin}${u.pathname}`;
+  } catch {
+    return undefined;
+  }
+}
+
+// 3ook.com renders the login UI as an in-page modal rather than a
+// dedicated route — URL-based detection doesn't work. Instead we ask
+// "is the user logged in?" via the presence of the `nuxt-session`
+// cookie on 3ook.com and show the MetaMask button whenever they're not.
+function isOn3ookHost(rawUrl: string): boolean {
+  try {
+    const u = new URL(rawUrl);
+    return u.hostname === '3ook.com' || u.hostname.endsWith('.3ook.com');
+  } catch {
+    return false;
+  }
+}
+
+async function isLoggedInTo3ook(): Promise<boolean> {
+  try {
+    const cookies = await CookieManager.get('https://3ook.com');
+    // `nuxt-session` is the encrypted Nuxt server session — it's the only
+    // cookie 3ook.com's frontend actually trusts for auth state.
+    const session = cookies?.['nuxt-session']?.value;
+    return typeof session === 'string' && session.length > 0;
+  } catch {
+    return false;
+  }
+}
 
 export default function App() {
   const insets = useSafeAreaInsets();
@@ -95,6 +245,8 @@ export default function App() {
   const canGoBackRef = useRef(false);
   const currentURLRef = useRef<string>('');
   const [mountURL, setMountURL] = useState<string | null>(null);
+  const [isLoggedOut, setIsLoggedOut] = useState(true);
+  const [isOn3ook, setIsOn3ook] = useState(false);
   // Android install-referrer attribution, persisted natively and re-asserted on
   // the window for the web's getAnalyticsParameters fallback to read.
   const installAttributionRef = useRef<InstallAttribution | null>(null);
@@ -141,6 +293,7 @@ export default function App() {
     notifyDocumentLost,
     handleWebViewError,
     handleManualRetry,
+    remountWebView,
   } = useWebViewRecovery({ onRemount: handleRemount });
 
   useEffect(() => {
@@ -334,11 +487,48 @@ export default function App() {
       if (!navState.url) return;
       const resolvedURL = resolveDeepLinkURL(navState.url) ?? navState.url;
       currentURLRef.current = resolvedURL;
+      if (__DEV__) {
+        console.warn('[WebView navigation]', {
+          url: sanitizeURLForLog(resolvedURL),
+          loading: navState.loading,
+          canGoBack: navState.canGoBack,
+        });
+      }
+      const on3ook = isOn3ookHost(resolvedURL);
+      setIsOn3ook(on3ook);
+      if (on3ook) {
+        // Cookie state can change between navigations (login modal closed,
+        // token refresh, etc.). Re-poll on every nav-state change.
+        isLoggedInTo3ook().then((loggedIn) => {
+          setIsLoggedOut(!loggedIn);
+        });
+      }
       if (saveTimer.current) clearTimeout(saveTimer.current);
       saveTimer.current = setTimeout(() => saveLastURL(resolvedURL), 1500);
     },
     []
   );
+
+  // After MetaMask login we have to force a fresh server-side render so
+  // Nuxt SSR picks up the newly-installed `nuxt-session` cookie. A bare
+  // `webView.reload()` may serve the cached HTML (Nuxt's payload includes
+  // the SSR-rendered auth state), so we mutate window.location to a URL
+  // with a cache-bust query param, guaranteeing a fresh GET.
+  const handleMetaMaskAuthenticated = useCallback(() => {
+    setIsLoggedOut(false);
+    webViewRef.current?.injectJavaScript(
+      `(function(){
+        try {
+          var u = new URL(window.location.href);
+          u.searchParams.set('_t', String(Date.now()));
+          window.location.href = u.toString();
+        } catch (e) {
+          window.location.reload();
+        }
+      })();
+      true;`
+    );
+  }, []);
   useEffect(() => {
     return () => {
       if (saveTimer.current) {
@@ -362,13 +552,60 @@ export default function App() {
 
   const handleMessage = useCallback(
     async (event: WebViewMessageEvent) => {
+      const raw = event.nativeEvent.data;
       try {
-        await dispatch(event.nativeEvent.data);
+        const msg = JSON.parse(raw) as unknown;
+        if (
+          msg &&
+          typeof msg === 'object' &&
+          'type' in msg &&
+          (msg as { type?: unknown }).type === '__nativeDebugLog'
+        ) {
+          const debug = msg as Record<string, unknown>;
+          console.warn('[WebView debug]', {
+            level: typeof debug.level === 'string' ? debug.level : 'unknown',
+            source: typeof debug.source === 'string' ? debug.source : 'unknown',
+            message: typeof debug.message === 'string' ? debug.message : '',
+            page: typeof debug.page === 'string' ? debug.page : undefined,
+            filename: typeof debug.filename === 'string' ? debug.filename : undefined,
+            line: typeof debug.line === 'number' ? debug.line : undefined,
+            column: typeof debug.column === 'number' ? debug.column : undefined,
+          });
+          return;
+        }
+      } catch {
+        // Let the bridge dispatcher produce the existing malformed JSON warning.
+      }
+      try {
+        await dispatch(raw);
       } catch (e) {
         console.warn('[onMessage]', e);
       }
     },
     []
+  );
+
+  const handleHttpError = useCallback((e: WebViewHttpErrorEvent) => {
+    const { statusCode, description, url } = e.nativeEvent;
+    console.warn('[WebView HTTP error]', {
+      statusCode,
+      description,
+      url: sanitizeURLForLog(url),
+    });
+  }, []);
+
+  const handleRenderProcessGone = useCallback(
+    (e: WebViewRenderProcessGoneEvent) => {
+      console.warn('[WebView render process gone]', {
+        didCrash: e.nativeEvent.didCrash,
+        url: sanitizeURLForLog(currentURLRef.current),
+      });
+      trackEvent('webview_render_process_gone', {
+        did_crash: e.nativeEvent.didCrash,
+      });
+      remountWebView();
+    },
+    [remountWebView]
   );
 
   return (
@@ -403,7 +640,9 @@ export default function App() {
               <View style={shouldPreserveDocument() ? undefined : styles.errorFallback} />
             )}
             webviewDebuggingEnabled={__DEV__}
-            injectedJavaScriptBeforeContentLoaded={NATIVE_BRIDGE_BOOTSTRAP}
+            injectedJavaScriptBeforeContentLoaded={
+              NATIVE_BRIDGE_BOOTSTRAP + WEBVIEW_DEBUG_BOOTSTRAP
+            }
             onShouldStartLoadWithRequest={handleNavigationRequest}
             onNavigationStateChange={handleNavigationStateChange}
             onMessage={handleMessage}
@@ -411,10 +650,15 @@ export default function App() {
             onLoad={handleLoad}
             onLoadEnd={handleLoadEnd}
             onContentProcessDidTerminate={handleContentProcessDidTerminate}
+            onRenderProcessGone={handleRenderProcessGone}
             onError={handleWebViewError}
-            onHttpError={(e) => console.warn('[WebView HTTP error]', e.nativeEvent)}
+            onHttpError={handleHttpError}
           />
         )}
+        <MetaMaskLoginButton
+          visible={isOn3ook && isLoggedOut && !loadFailed && !isRetryInProgress}
+          onAuthenticated={handleMetaMaskAuthenticated}
+        />
         <LoadErrorOverlay
           isOnline={isOnline}
           loadFailed={loadFailed}
