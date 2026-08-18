@@ -173,6 +173,7 @@ const config: ExpoConfig = {
   },
   extra: {
     router: {},
+    intercomEnabled: !!intercomPlugin,
     eas: {
       projectId: 'b9b3551b-65fa-4f8e-b570-2bbb220b971b',
     },
