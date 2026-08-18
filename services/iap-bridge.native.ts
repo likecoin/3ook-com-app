@@ -163,13 +163,13 @@ function extractSubscriberAttributes(value: unknown): Record<string, string> {
   return result;
 }
 
-// Mirror utm_campaign / utm_source onto RevenueCat's reserved $campaign /
-// $mediaSource so RC's attribution surfaces populate. Additive: raw utm* keys
-// stay for the backend webhook; looser UTM fields aren't mapped. Best-effort.
+// Mirror the web's resolved campaign / mediaSource onto RevenueCat's reserved
+// $campaign / $mediaSource — not last-touch utmSource, usually an internal
+// surface name here, which RC keeps forever. '' is a no-op, never a clear.
 async function applyAttributionAttributes(attributes: Record<string, string>): Promise<void> {
   const ops: Promise<void>[] = [];
-  if (attributes.utmCampaign) ops.push(Purchases.setCampaign(attributes.utmCampaign));
-  if (attributes.utmSource) ops.push(Purchases.setMediaSource(attributes.utmSource));
+  if (attributes.campaign) ops.push(Purchases.setCampaign(attributes.campaign));
+  if (attributes.mediaSource) ops.push(Purchases.setMediaSource(attributes.mediaSource));
   if (!ops.length) return;
   try {
     await Promise.all(ops);
@@ -448,8 +448,7 @@ export function getIAPHandlers(send: SendToWebView): BridgeHandlerMap {
           } catch (attrErr) {
             console.warn('[iap] failed to set subscriber attributes', attrErr);
           }
-          // Also mirror utm_campaign / utm_source onto RevenueCat's reserved
-          // attribution attributes so RC's own surfaces populate.
+          // Also mirror the resolved channel onto RC's reserved attribution keys.
           await applyAttributionAttributes(attributes);
         }
         const { customerInfo } = await Purchases.purchasePackage(pkg);
