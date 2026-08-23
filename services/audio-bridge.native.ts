@@ -367,34 +367,39 @@ function armStuckTimer(): void {
     stuckRetried = true;
     const p = getActivePlayer();
     if (!p) return;
+    const track = queue[currentIndex];
+    const cacheState: CacheState = track ? cacheStateFor(track) : 'miss';
     trackEvent('audio_stuck_retry', {
       current_index: currentIndex,
-      // Whether the segment that froze was playing from disk. A cache that
-      // serves bad files would show up here as a hit-skewed stall rate.
-      cache_state: queue[currentIndex] ? cacheStateFor(queue[currentIndex]) : 'miss',
+      cache_state: cacheState,
       is_online: isOnline,
     });
-    // Player never buffered (silently-failed source, the common mid-queue
-    // stuck case): re-issue the source to force a fresh fetch. If it IS
-    // mid-buffer, the bare play() below avoids nuking a nearly-ready buffer.
-    const track = queue[currentIndex];
-    if (track && !p.isLoaded && !p.isBuffering) {
-      // Pause before replace so iOS doesn't schedule its own auto-resume
-      // that races the play() below and mis-binds didJustFinish (see playTrack).
-      p.pause();
-      // Evict any cached copy (it may be corrupt) and stream directly, so the
-      // retry cannot replay the same local file that just froze.
-      evictCachedAudio(track.uri);
-      p.replace(streamSource(track));
-      p.setPlaybackRate(currentRate);
-    }
-    withSessionRetry('stuck_retry', p, () => p.play());
+    // A stall is usually a deactivated iOS session, not a bad segment: hits
+    // stall as often as misses and almost all happen online, so the file is
+    // fine. Re-assert the session and re-issue only when the player never
+    // loaded, keeping any cached copy (playbackSource prefers it). A genuine
+    // decode failure evicts in the 'failed' branch of onStatus instead.
+    const reissue = !!track && !p.isLoaded && !p.isBuffering;
+    reassertSession('stuck_retry', p, () => {
+      if (reissue) {
+        // Pause before replace so iOS doesn't schedule its own auto-resume that
+        // races the play() below and mis-binds didJustFinish (see playTrack).
+        p.pause();
+        p.replace(playbackSource(track));
+        p.setPlaybackRate(currentRate);
+      }
+      p.play();
+    });
     stuckTimer = setTimeout(() => {
       stuckTimer = null;
       if (lastSentState === 'playing' || !active || errored) return;
       console.warn('Audio stuck — retry failed');
       errored = true;
-      trackEvent('audio_stuck_failed', { current_index: currentIndex, is_online: isOnline });
+      trackEvent('audio_stuck_failed', {
+        current_index: currentIndex,
+        cache_state: cacheState,
+        is_online: isOnline,
+      });
       notifyWebView?.({ type: 'error', message: 'Playback stuck' });
     }, STUCK_TIMEOUT_MS);
   }, STUCK_TIMEOUT_MS);
