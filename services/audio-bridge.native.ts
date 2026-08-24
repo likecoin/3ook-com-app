@@ -132,6 +132,8 @@ let isOnline = true;
 // and cannot separate a 200ms miss from a 4s one.
 let pendingStart: {
   index: number;
+  fromIndex: number;
+  autoAdvance: boolean;
   at: number;
   preloadState: PreloadState;
   cacheState: CacheState;
@@ -643,6 +645,8 @@ async function doLoad(msg: LoadMessage): Promise<void> {
   });
   pendingStart = {
     index: currentIndex,
+    fromIndex: -1,
+    autoAdvance: false,
     at: Date.now(),
     preloadState: 'fresh',
     cacheState: cacheStateFor(queue[currentIndex]),
@@ -660,6 +664,9 @@ export function handleResume(): void {
   active = true;
   errored = false;
   stuckRetried = false;
+  // Restart the clock: a segment paused before it ever played would otherwise
+  // report the entire paused stretch as load_ms.
+  if (pendingStart) pendingStart.at = Date.now();
   const p = getActivePlayer();
   if (p) withSessionRetry('resume', p, () => p.play());
 }
@@ -716,7 +723,14 @@ export function handleSkipTo(index: number, { resetFinishGuard = true } = {}): v
   // Read before the source is swapped in, so it reports whether the segment was
   // already on disk when we advanced to it rather than after any later write.
   const cacheState = cacheStateFor(queue[index]);
-  pendingStart = { index, at: Date.now(), preloadState, cacheState };
+  pendingStart = {
+    index,
+    fromIndex: lastIndex,
+    autoAdvance: !resetFinishGuard,
+    at: Date.now(),
+    preloadState,
+    cacheState,
+  };
 
   if (preloadState === 'hit') {
     swapToIdle(queue[currentIndex]);
@@ -730,18 +744,6 @@ export function handleSkipTo(index: number, { resetFinishGuard = true } = {}): v
     index: currentIndex,
     lastIndex,
     preloadState,
-  });
-  // Captured natively because the WebView is suspended in background; tracking
-  // here also gives us preload hit-rate without the web app reporting it.
-  trackEvent('audio_track_advanced', {
-    from_index: lastIndex,
-    to_index: currentIndex,
-    preload_state: preloadState,
-    auto_advance: !resetFinishGuard,
-    // Whether this segment was already on disk when we advanced to it.
-    cache_state: cacheState,
-    is_online: isOnline,
-    prefetch_depth: prefetch.depth,
   });
   preloadNext();
   // Arm only once a segment boundary has been crossed: a book sampled and
@@ -845,12 +847,17 @@ export function registerEventListeners(sendToWebView: SendToWebView) {
     if (state === 'playing') {
       errored = false;
       clearStuckTimer();
+      // Captured natively because the WebView is suspended in background; it
+      // also gives us preload hit-rate without the web app reporting it.
       // Only fires for a track that was just started, so a resume from pause
-      // does not report a load. A segment that never reaches playing leaves its
-      // pendingStart to be overwritten — the missing event is the stall signal.
+      // does not report a load. A segment that never reaches playing emits
+      // nothing at all, so preload_state here is conditioned on success and
+      // reads high — a stall is only visible as a gap in to_index.
       if (pendingStart && pendingStart.index === currentIndex) {
-        trackEvent('audio_track_playing', {
-          index: currentIndex,
+        trackEvent('audio_segment', {
+          from_index: pendingStart.fromIndex,
+          to_index: pendingStart.index,
+          auto_advance: pendingStart.autoAdvance,
           load_ms: Date.now() - pendingStart.at,
           preload_state: pendingStart.preloadState,
           cache_state: pendingStart.cacheState,

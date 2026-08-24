@@ -313,7 +313,6 @@ export function getIntercomHandlers(send: SendToWebView): BridgeHandlerMap {
         msg.metaData && typeof msg.metaData === 'object'
           ? (msg.metaData as Record<string, unknown>)
           : undefined;
-      trackEvent('intercom_event_logged', { name, has_metadata: !!metaData });
       await safeCall('logEvent', () => Intercom.logEvent(name, metaData));
     },
 
