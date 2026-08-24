@@ -124,6 +124,7 @@ export default function App() {
   }, []);
 
   const {
+    resolveColdStartURL,
     handleNotificationDeepLink,
     markLoadStarted,
     markLoadCompleted,
@@ -160,22 +161,7 @@ export default function App() {
     // cold-start critical path.
     const connectivityReady = seedConnectivity();
     (async () => {
-      const deepLink = await Linking.getInitialURL();
-      const resolved = resolveDeepLinkURL(deepLink);
-      if (resolved) {
-        trackEvent('launched_with_deep_link', {
-          source: 'cold_start',
-          disposition: 'webview',
-        });
-      } else if (deepLink && isBookstoreURL(deepLink)) {
-        trackEvent('launched_with_deep_link', {
-          source: 'cold_start',
-          disposition: 'external',
-        });
-        openExternalURL(deepLink).catch((e) =>
-          console.warn('[cold start external link] failed to open:', e)
-        );
-      }
+      const resolved = resolveColdStartURL(await Linking.getInitialURL());
       const url = resolved ?? (await getInitialURL());
       currentURLRef.current = url;
       // Await the connectivity seed before the WebView's first mount so a cold
@@ -183,7 +169,7 @@ export default function App() {
       await connectivityReady;
       setMountURL(url);
     })();
-  }, [seedConnectivity]);
+  }, [seedConnectivity, resolveColdStartURL]);
 
   // Each WebView load lands in a fresh JS context, so re-assert install
   // attribution on every load; the web reads it lazily at checkout time.

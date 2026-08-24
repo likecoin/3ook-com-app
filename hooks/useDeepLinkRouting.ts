@@ -7,9 +7,12 @@ import { isBookstoreURL } from '../services/external-hosts';
 import { isDeepLink, openDeepLink, openExternalURL } from '../services/url-bridge';
 import { resolveDeepLinkURL } from '../services/url-storage';
 
-// `source` dimension of the launched_with_deep_link event; 'cold_start' is
-// tracked at the initial-URL resolution site in app/index.tsx.
+// `source` dimension of the launched_with_deep_link event.
 export type DeepLinkSource = 'cold_start' | 'warm' | 'push_notification';
+
+// Long enough to swallow an OS re-delivery on foreground, short enough that a
+// user tapping the same link again gets the browser.
+const EXTERNAL_REPEAT_WINDOW_MS = 5000;
 
 // Routes deep links into the WebView behind a parked-until-load gate.
 // `currentURLRef` stays owned by the caller — navigation-state tracking writes
@@ -26,6 +29,29 @@ export function useDeepLinkRouting({
   // URL and flush it once the page is navigable again.
   const hasLoadedRef = useRef(false);
   const pendingDeepLinkRef = useRef<string | null>(null);
+  // The OS re-delivers an unchanged `url` event on every foreground, which
+  // would otherwise re-open the browser and re-report the launch each time.
+  // Windowed rather than permanent, as saveLastURL does: routeToWebView can
+  // dedupe forever because navigation rewrites currentURLRef, but nothing
+  // clears this one, and a second deliberate tap is a real launch.
+  const lastExternalRef = useRef<{ url: string; at: number } | null>(null);
+
+  // Every external open goes through here, so they all share the dedupe.
+  const openExternalOnce = useCallback((url: string, source: DeepLinkSource) => {
+    const now = Date.now();
+    const last = lastExternalRef.current;
+    if (last?.url === url && now - last.at < EXTERNAL_REPEAT_WINDOW_MS) return;
+    const attempt = { url, at: now };
+    lastExternalRef.current = attempt;
+    trackEvent('launched_with_deep_link', { source, disposition: 'external' });
+    openExternalURL(url).catch((e) => {
+      // Release the guard so a failed open is retryable before the window,
+      // unless a later attempt has already claimed it. Identity, not URL: the
+      // Android Custom Tab promise stays pending until the tab is dismissed.
+      if (lastExternalRef.current === attempt) lastExternalRef.current = null;
+      console.warn(`[${source} external link] failed to open:`, e);
+    });
+  }, []);
 
   // All in-WebView deep-link entries (warm Universal Links, push taps) share
   // the dedupe, tracking, and parked-until-load gate here.
@@ -43,6 +69,27 @@ export function useDeepLinkRouting({
     [navigateWebView, currentURLRef]
   );
 
+  // Cold start can't use routeToWebView: its URL seeds the WebView's first
+  // mount rather than a navigation, so this returns the target instead of
+  // navigating. Keeps every launched_with_deep_link emission in one file.
+  const resolveColdStartURL = useCallback(
+    (rawURL: string | null) => {
+      const target = resolveDeepLinkURL(rawURL);
+      if (target) {
+        trackEvent('launched_with_deep_link', {
+          source: 'cold_start',
+          disposition: 'webview',
+        });
+        return target;
+      }
+      if (rawURL && isBookstoreURL(rawURL)) {
+        openExternalOnce(rawURL, 'cold_start');
+      }
+      return null;
+    },
+    [openExternalOnce]
+  );
+
   useEffect(() => {
     const sub = Linking.addEventListener('url', ({ url }) => {
       const target = resolveDeepLinkURL(url);
@@ -51,17 +98,11 @@ export function useDeepLinkRouting({
         return;
       }
       if (isBookstoreURL(url)) {
-        trackEvent('launched_with_deep_link', {
-          source: 'warm',
-          disposition: 'external',
-        });
-        openExternalURL(url).catch((e) =>
-          console.warn('[warm external link] failed to open:', e)
-        );
+        openExternalOnce(url, 'warm');
       }
     });
     return () => sub.remove();
-  }, [routeToWebView]);
+  }, [routeToWebView, openExternalOnce]);
 
   // Intercom push campaigns with a "URI on tap" deliver the destination via
   // expo-notifications, not expo-linking, so they bypass the Linking listener
@@ -92,13 +133,7 @@ export function useDeepLinkRouting({
         // HTTPS only: a campaign has no reason to open plaintext http, and
         // dropping it removes a downgrade/MITM vector on the external tier.
         if (protocol === 'https:') {
-          trackEvent('launched_with_deep_link', {
-            source: 'push_notification',
-            disposition: 'external',
-          });
-          openExternalURL(rawURL).catch((e) =>
-            console.warn('[push external link] failed to open:', e)
-          );
+          openExternalOnce(rawURL, 'push_notification');
           return;
         }
       } catch {
@@ -109,7 +144,7 @@ export function useDeepLinkRouting({
         disposition: 'rejected',
       });
     },
-    [routeToWebView]
+    [routeToWebView, openExternalOnce]
   );
 
   // Any full document load (cold start, pull-to-refresh, reload()) starts in a
@@ -137,6 +172,7 @@ export function useDeepLinkRouting({
   const isLoaded = useCallback(() => hasLoadedRef.current, []);
 
   return {
+    resolveColdStartURL,
     handleNotificationDeepLink,
     markLoadStarted,
     markLoadCompleted,
