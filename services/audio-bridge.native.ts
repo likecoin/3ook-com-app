@@ -376,25 +376,35 @@ function armStuckTimer(): void {
     });
     // A stall is usually a deactivated iOS session, not a bad segment: hits
     // stall as often as misses and almost all happen online, so the file is
-    // fine. Re-assert the session and re-issue only when the player never
-    // loaded, keeping any cached copy (playbackSource prefers it). A genuine
-    // decode failure evicts in the 'failed' branch of onStatus instead.
-    const reissue = !!track && !p.isLoaded && !p.isBuffering;
-    reassertSession('stuck_retry', p, () => {
-      if (reissue) {
-        // Pause before replace so iOS doesn't schedule its own auto-resume that
-        // races the play() below and mis-binds didJustFinish (see playTrack).
-        p.pause();
-        p.replace(playbackSource(track));
-        p.setPlaybackRate(currentRate);
-      }
-      p.play();
-    });
+    // fine. Re-assert the session, keeping any cached copy for the re-issue.
+    reassertSession(
+      'stuck_retry',
+      p,
+      () => {
+        // Read the load state after the session await, not before: the source
+        // may have loaded meanwhile, and replacing then restarts a segment
+        // that already recovered on its own.
+        if (track && !p.isLoaded && !p.isBuffering) {
+          // Pause before replace so iOS doesn't schedule its own auto-resume that
+          // races the play() below and mis-binds didJustFinish (see playTrack).
+          p.pause();
+          p.replace(playbackSource(track));
+          p.setPlaybackRate(currentRate);
+        }
+        p.play();
+      },
+      // The stall gets one retry, so take it even if re-activation failed.
+      true,
+    );
     stuckTimer = setTimeout(() => {
       stuckTimer = null;
       if (lastSentState === 'playing' || !active || errored) return;
       console.warn('Audio stuck — retry failed');
       errored = true;
+      // Stalled twice, the second time after a re-issue: the disk copy is
+      // suspect and onStatus only evicts on a reported 'failed'. Offline it is
+      // unreplaceable, so keep it. cacheState is the snapshot from retry time.
+      if (track && cacheState === 'hit' && isOnline) evictCachedAudio(track.uri);
       trackEvent('audio_stuck_failed', {
         current_index: currentIndex,
         cache_state: cacheState,
@@ -408,16 +418,28 @@ function armStuckTimer(): void {
 // Wait for any pending release (as doLoad does), re-assert the session, then
 // run once more if playback is still wanted. `p` cancels the retry if the queue
 // swapped slots meanwhile; pass null to resolve the active player at retry time.
-function reassertSession(stage: SessionRetryStage, p: AudioPlayer | null, run: () => void): void {
+function reassertSession(
+  stage: SessionRetryStage,
+  p: AudioPlayer | null,
+  run: () => void,
+  // Run anyway when re-activation fails, for callers whose only attempt this is.
+  runIfActivationFails = false,
+): void {
+  const stillWanted = () => active && !errored && (!p || getActivePlayer() === p);
   Promise.resolve(sessionReleasePromise)
     // A stop mid-await wins — reactivating would hold the session with nothing
     // playing, ducking other apps under interruptionMode 'doNotMix'.
     .then(() => (active && !errored ? setIsAudioActiveAsync(true) : null))
-    .then(() => {
-      if (!active || errored) return;
-      if (p && getActivePlayer() !== p) return;
-      run();
-    })
+    .then(
+      () => {
+        if (stillWanted()) run();
+      },
+      (err) => {
+        // Only activation reaches here, so run() cannot have been tried yet.
+        if (runIfActivationFails && stillWanted()) run();
+        throw err;
+      },
+    )
     .catch((err) => {
       console.warn(`${stage} failed after session retry:`, err);
       trackEvent('audio_session_retry_failed', {
