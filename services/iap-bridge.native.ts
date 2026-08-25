@@ -478,7 +478,18 @@ export function getIAPHandlers(send: SendToWebView): BridgeHandlerMap {
           trackEvent('iap_purchase_cancelled', { period, tier });
           return;
         }
-        send({ type: 'iapPurchaseResult', status: 'error', period, tier, message: err.message || 'Purchase failed' });
+        // Names the PURCHASES_ERROR_CODE so the web can tell a user-side store
+        // condition from a real failure; err.code is the bare ordinal ("3"). Both
+        // are asserted, not guaranteed — a non-RevenueCat throw can be non-string.
+        const readableCode = err.userInfo?.readableErrorCode;
+        send({
+          type: 'iapPurchaseResult',
+          status: 'error',
+          period,
+          tier,
+          message: (typeof err.message === 'string' && err.message) || 'Purchase failed',
+          code: typeof readableCode === 'string' ? readableCode : undefined,
+        });
         trackEvent('iap_purchase_error', { period, tier, reason: 'exception', ...errorProperties(e) });
         console.warn('[iap] purchase failed', e);
       }
