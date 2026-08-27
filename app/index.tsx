@@ -41,6 +41,7 @@ import {
   resyncPushStatusToWeb,
   wrapIdentityHandlers,
 } from '../services/intercom-bridge';
+import { startOrientationWatcher } from '../services/orientation';
 import {
   getStoreReviewHandlers,
   startStoreReviewWatcher,
@@ -232,10 +233,12 @@ export default function App() {
       handleNotificationDeepLink
     );
     const unsubscribeStoreReview = startStoreReviewWatcher();
+    const unsubscribeOrientation = startOrientationWatcher();
     return () => {
       unsubscribeAudio();
       unsubscribeIntercom();
       unsubscribeStoreReview();
+      unsubscribeOrientation();
       clearHandlers();
     };
   }, [
@@ -370,7 +373,14 @@ export default function App() {
   return (
     <>
       <View style={[styles.topSpacer, { height: insets.top }]} />
-      <View style={styles.container}>
+      <View
+        style={[
+          styles.container,
+          // Zero everywhere the app is portrait-locked; a landscape Android
+          // tablet with 3-button navigation puts the bar down one side.
+          { paddingLeft: insets.left, paddingRight: insets.right },
+        ]}
+      >
         {mountURL && (
           <WebView
             key={webViewKey}
