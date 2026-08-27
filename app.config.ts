@@ -60,6 +60,9 @@ const config: ExpoConfig = {
   owner: 'likerland',
   slug: '3ook-com-app',
   version: '1.3.2',
+  // Portrait by default; iOS frees iPad via UISupportedInterfaceOrientations~ipad
+  // and services/orientation unlocks Android sw600dp+ at runtime. Keep
+  // expo-screen-orientation out of `plugins`: one mask would flatten that split.
   orientation: 'portrait',
   icon: './assets/images/icon.png',
   scheme: 'com.3ook',
