@@ -1,15 +1,5 @@
+import type { LoadMessage } from './audio-bridge';
 import type { BridgeHandlerMap } from './bridge-dispatcher';
-
-export interface LoadMessage {
-  tracks: { index: number; url: string; title?: string }[];
-  startIndex: number;
-  rate: number;
-  metadata: {
-    bookTitle: string;
-    authorName: string;
-    coverUrl: string;
-  };
-}
 
 export async function setupPlayer(): Promise<void> {}
 export async function handleLoad(_msg: LoadMessage): Promise<void> {}

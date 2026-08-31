@@ -9,6 +9,14 @@ export interface LoadMessage {
     authorName: string;
     coverUrl: string;
   };
+  // Segments to keep on disk ahead of the playhead. Web decides it because only
+  // web knows entitlement and TTS trial quota; omitted means 1, i.e. no
+  // prefetch, which is what every build predating this field gets.
+  prefetchCount?: number;
+  // Joins these audio events to the web app's tts_* events,
+  // which are the only side holding book, voice, entitlement and trial context.
+  // Absent on builds predating this field, and on non-TTS loads.
+  ttsSessionId?: string;
 }
 
 export function setupPlayer(): Promise<void>;
