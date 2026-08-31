@@ -16,6 +16,7 @@ import {
 } from '../modules/audio-interruption';
 
 import { trackEvent } from './analytics';
+import type { LoadMessage } from './audio-bridge';
 import {
   clearAudioCache,
   ensureCachedAudio,
@@ -26,27 +27,6 @@ import {
 } from './audio-cache';
 import type { SendToWebView, BridgeHandlerMap } from './bridge-dispatcher';
 import { armStoreReview, recordListening, setAudioActive } from './store-review';
-
-interface TrackInfo {
-  index: number;
-  url: string;
-  title?: string;
-}
-
-export interface LoadMessage {
-  tracks: TrackInfo[];
-  startIndex: number;
-  rate: number;
-  metadata: {
-    bookTitle: string;
-    authorName: string;
-    coverUrl: string;
-  };
-  // Segments to keep on disk ahead of the playhead. Web decides it because only
-  // web knows entitlement and TTS trial quota; omitted means 1, i.e. no
-  // prefetch, which is what every build predating this field gets.
-  prefetchCount?: number;
-}
 
 interface QueueTrack {
   uri: string;
@@ -90,6 +70,7 @@ let queue: QueueTrack[] = [];
 let currentIndex = -1;
 let currentRate = 1;
 let lastFinishTime = 0;
+let ttsSessionId: string | undefined;
 
 // Minimum listening within one load before finishing the queue counts as
 // "finished a book" for the review prompt. Rejects skipping to the last
@@ -607,6 +588,7 @@ async function doLoad(msg: LoadMessage): Promise<void> {
   currentIndex = msg.startIndex;
   currentRate = msg.rate;
   lastFinishTime = 0;
+  ttsSessionId = msg.ttsSessionId;
   active = true;
   // Clamp rather than trust web. A depth of 1 disables prefetch entirely,
   // which is what every web build predating prefetchCount gets.
@@ -864,6 +846,11 @@ export function registerEventListeners(sendToWebView: SendToWebView) {
           stuck_retried: stuckRetried,
           is_online: isOnline,
           prefetch_depth: prefetch.depth,
+          // Segments contiguously warm ahead of the playhead.
+          // prefetch_depth is the target; this is what the lookahead achieved,
+          // and the only read on whether that depth is sized right.
+          warm_runway: Math.max(warmedThroughIndex() - currentIndex, 0),
+          tts_session_id: ttsSessionId,
         });
         pendingStart = null;
       }
