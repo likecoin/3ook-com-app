@@ -97,6 +97,11 @@ let appKitInstance: AppKitInstance | null = null;
 
 export function initWalletAuth(): AppKitInstance {
   if (appKitInstance) return appKitInstance;
+  if (!hasValidReownProjectId()) {
+    console.warn(
+      '[wallet-auth] EXPO_PUBLIC_REOWN_PROJECT_ID is not set — WalletConnect handshake will hang'
+    );
+  }
   appKitInstance = createAppKit({
     projectId: PROJECT_ID,
     metadata,

@@ -21,6 +21,22 @@ export function isDeepLink(url: string): boolean {
   );
 }
 
+/** WalletConnect / AppKit return URLs must not be loaded in the WebView. */
+export function isWalletConnectCallbackURL(url: string): boolean {
+  if (!url) return false;
+  if (url.startsWith('wc:') || url.startsWith('com.3ook://')) return true;
+  try {
+    const parsed = new URL(url);
+    if (parsed.searchParams.has('wc_ev')) return true;
+    if (parsed.pathname === '/wc' || parsed.pathname.endsWith('/wc')) return true;
+    const wcUri = parsed.searchParams.get('uri');
+    if (wcUri?.startsWith('wc:')) return true;
+    return false;
+  } catch {
+    return url.includes('wc_ev');
+  }
+}
+
 export async function openDeepLink(url: string): Promise<void> {
   await Linking.openURL(url);
 }

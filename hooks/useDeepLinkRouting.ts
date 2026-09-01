@@ -4,7 +4,12 @@ import type { RefObject } from 'react';
 
 import { trackEvent } from '../services/analytics';
 import { isBookstoreURL } from '../services/external-hosts';
-import { isDeepLink, openDeepLink, openExternalURL } from '../services/url-bridge';
+import {
+  isDeepLink,
+  isWalletConnectCallbackURL,
+  openDeepLink,
+  openExternalURL,
+} from '../services/url-bridge';
 import { resolveDeepLinkURL } from '../services/url-storage';
 
 // `source` dimension of the launched_with_deep_link event; 'cold_start' is
@@ -45,6 +50,7 @@ export function useDeepLinkRouting({
 
   useEffect(() => {
     const sub = Linking.addEventListener('url', ({ url }) => {
+      if (isWalletConnectCallbackURL(url)) return;
       const target = resolveDeepLinkURL(url);
       if (target) {
         routeToWebView(target, 'warm');
@@ -72,6 +78,7 @@ export function useDeepLinkRouting({
   // data:, non-allowlisted custom schemes) is dropped, never opened.
   const handleNotificationDeepLink = useCallback(
     (rawURL: string) => {
+      if (isWalletConnectCallbackURL(rawURL)) return;
       const target = resolveDeepLinkURL(rawURL);
       if (target) {
         routeToWebView(target, 'push_notification');

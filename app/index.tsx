@@ -54,7 +54,12 @@ import {
   clearWebViewCache,
   isWebViewCacheClearSupported,
 } from '../modules/webview-cache';
-import { isDeepLink, openDeepLink, openExternalURL } from '../services/url-bridge';
+import {
+  isDeepLink,
+  isWalletConnectCallbackURL,
+  openDeepLink,
+  openExternalURL,
+} from '../services/url-bridge';
 import { getInitialURL, resolveDeepLinkURL, saveLastURL } from '../services/url-storage';
 
 // Appended to (not replacing) the system WebView UA via applicationNameForUserAgent,
@@ -247,6 +252,22 @@ export default function App() {
   const [mountURL, setMountURL] = useState<string | null>(null);
   const [isLoggedOut, setIsLoggedOut] = useState(true);
   const [isOn3ook, setIsOn3ook] = useState(false);
+
+  const refreshMetaMaskVisibility = useCallback((rawUrl: string | null | undefined) => {
+    if (!rawUrl) return;
+    const on3ook = isOn3ookHost(rawUrl);
+    setIsOn3ook(on3ook);
+    if (!on3ook) return;
+    isLoggedInTo3ook().then((loggedIn) => {
+      setIsLoggedOut(!loggedIn);
+      if (__DEV__) {
+        console.warn('[wallet-auth] button login check', {
+          url: sanitizeURLForLog(rawUrl),
+          loggedIn,
+        });
+      }
+    });
+  }, []);
   // Android install-referrer attribution, persisted natively and re-asserted on
   // the window for the web's getAnalyticsParameters fallback to read.
   const installAttributionRef = useRef<InstallAttribution | null>(null);
@@ -304,7 +325,11 @@ export default function App() {
     const connectivityReady = seedConnectivity();
     (async () => {
       const deepLink = await Linking.getInitialURL();
-      const resolved = resolveDeepLinkURL(deepLink);
+      // WalletConnect returns via https://3ook.com?wc_ev=…; AppKit consumes
+      // that Linking URL. Do not treat it as a bookstore page.
+      const resolved = isWalletConnectCallbackURL(deepLink ?? '')
+        ? null
+        : resolveDeepLinkURL(deepLink);
       if (resolved) {
         trackEvent('launched_with_deep_link', {
           source: 'cold_start',
@@ -325,8 +350,9 @@ export default function App() {
       // offline launch already uses the offline cache mode on Android.
       await connectivityReady;
       setMountURL(url);
+      refreshMetaMaskVisibility(url);
     })();
-  }, [seedConnectivity]);
+  }, [seedConnectivity, refreshMetaMaskVisibility]);
 
   // Each WebView load lands in a fresh JS context, so re-assert install
   // attribution on every load; the web reads it lazily at checkout time.
@@ -377,9 +403,23 @@ export default function App() {
     registerHandlers(getWebViewCacheHandlers(clearWebViewCacheAndReload));
     // identifyUser/resetUser fan out to analytics (base), RevenueCat logIn/Out
     // (IAP wrap), then Intercom (outer wrap) — one identity event, three sinks.
-    registerHandlers(
-      wrapIdentityHandlers(wrapIdentityForIAP(getIdentityHandlers()), sendToWebView)
+    const identityHandlers = wrapIdentityHandlers(
+      wrapIdentityForIAP(getIdentityHandlers()),
+      sendToWebView
     );
+    registerHandlers({
+      ...identityHandlers,
+      identifyUser: async (msg) => {
+        await identityHandlers.identifyUser?.(msg);
+        if (typeof msg.userId === 'string' && msg.userId) {
+          setIsLoggedOut(false);
+        }
+      },
+      resetUser: async (msg) => {
+        await identityHandlers.resetUser?.(msg);
+        setIsLoggedOut(true);
+      },
+    });
 
     setupPlayer();
     initAudioCache();
@@ -420,7 +460,13 @@ export default function App() {
     notifyLoadSucceeded();
     injectInstallAttribution();
     markLoadCompleted();
-  }, [notifyLoadSucceeded, injectInstallAttribution, markLoadCompleted]);
+    refreshMetaMaskVisibility(currentURLRef.current);
+  }, [
+    notifyLoadSucceeded,
+    injectInstallAttribution,
+    markLoadCompleted,
+    refreshMetaMaskVisibility,
+  ]);
 
   // Each WebView load lands in a fresh JS context with no memory of prior
   // dispatches; re-emit native state that web listeners want at boot.
@@ -435,6 +481,9 @@ export default function App() {
   // would otherwise silently block them.
   const handleNavigationRequest = useCallback(
     (request: ShouldStartLoadRequest) => {
+      if (isWalletConnectCallbackURL(request.url)) {
+        return false;
+      }
       if (isDeepLink(request.url)) {
         // Don't capture full URL — wallet links can carry session tokens or
         // user data. Scheme/host is enough to attribute the route.
@@ -494,20 +543,23 @@ export default function App() {
           canGoBack: navState.canGoBack,
         });
       }
-      const on3ook = isOn3ookHost(resolvedURL);
-      setIsOn3ook(on3ook);
-      if (on3ook) {
-        // Cookie state can change between navigations (login modal closed,
-        // token refresh, etc.). Re-poll on every nav-state change.
-        isLoggedInTo3ook().then((loggedIn) => {
-          setIsLoggedOut(!loggedIn);
-        });
-      }
+      refreshMetaMaskVisibility(resolvedURL);
       if (saveTimer.current) clearTimeout(saveTimer.current);
       saveTimer.current = setTimeout(() => saveLastURL(resolvedURL), 1500);
     },
-    []
+    [refreshMetaMaskVisibility]
   );
+
+  useEffect(() => {
+    if (!__DEV__) return;
+    console.warn('[wallet-auth] button visibility', {
+      isOn3ook,
+      isLoggedOut,
+      loadFailed,
+      isRetryInProgress,
+      visible: isOn3ook && isLoggedOut && !loadFailed && !isRetryInProgress,
+    });
+  }, [isOn3ook, isLoggedOut, loadFailed, isRetryInProgress]);
 
   // After MetaMask login we have to force a fresh server-side render so
   // Nuxt SSR picks up the newly-installed `nuxt-session` cookie. A bare
