@@ -190,6 +190,7 @@ const config: ExpoConfig = {
     ],
     'expo-sharing',
     './plugins/withAppBoundDomains',
+    './plugins/withOkHttpVersion',
     // Intercom must precede any plugin that registers its own
     // FirebaseMessagingService (e.g. expo-notifications). Intercom's
     // auto-generated service routes Intercom pushes to the SDK and forwards
