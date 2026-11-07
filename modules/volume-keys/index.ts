@@ -10,8 +10,10 @@ interface VolumeKeysModule {
   ): { remove(): void };
 }
 
+// Android only: iOS has no API for volume button presses, and faking one
+// by watching the system volume risks App Store rejection (Guideline 2.5.9).
 const NativeModule =
-  Platform.OS === 'ios' || Platform.OS === 'android'
+  Platform.OS === 'android'
     ? requireOptionalNativeModule<VolumeKeysModule>('VolumeKeys')
     : null;
 
@@ -21,7 +23,7 @@ export function isVolumeKeysSupported(): boolean {
 
 /**
  * While enabled, volume key presses are reported to listeners instead of
- * changing the volume. Starts disabled.
+ * changing the volume. Starts disabled; a no-op where unsupported.
  */
 export function setVolumeKeysEnabled(enabled: boolean): void {
   NativeModule?.setEnabled(enabled);

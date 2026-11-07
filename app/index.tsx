@@ -103,7 +103,7 @@ const NATIVE_BRIDGE_FEATURES: readonly string[] = [
   // differ while prefetch fills, and entirely when the cache kill-switch is off.
   'warmDepth',
   // Hardware volume keys turn pages while web sends setVolumeKeyPaging true;
-  // presses arrive as volumeKeyPressed. See modules/volume-keys.
+  // presses arrive as volumeKeyPressed. Android only, see modules/volume-keys.
   ...(isVolumeKeyPagingSupported() ? ['volumeKeyPaging'] : []),
 ];
 // Also posts documentStart once per real document load; onLoadStart can't
