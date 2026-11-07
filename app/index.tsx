@@ -53,6 +53,11 @@ import {
 } from '../modules/webview-cache';
 import { isDeepLink, openDeepLink, openExternalURL } from '../services/url-bridge';
 import { getInitialURL, resolveDeepLinkURL, saveLastURL } from '../services/url-storage';
+import {
+  getVolumeKeyHandlers,
+  isVolumeKeyPagingSupported,
+  registerVolumeKeyEventListeners,
+} from '../services/volume-key-bridge';
 
 // Appended to (not replacing) the system WebView UA via applicationNameForUserAgent,
 // so the real Chromium version stays visible to the web app, server, and analytics.
@@ -97,8 +102,13 @@ const NATIVE_BRIDGE_FEATURES: readonly string[] = [
   // a dropout on what is local instead of on the depth it asked for. The two
   // differ while prefetch fills, and entirely when the cache kill-switch is off.
   'warmDepth',
+  // Hardware volume keys turn pages while web sends setVolumeKeyPaging true;
+  // presses arrive as volumeKeyPressed. See modules/volume-keys.
+  ...(isVolumeKeyPagingSupported() ? ['volumeKeyPaging'] : []),
 ];
-const NATIVE_BRIDGE_BOOTSTRAP = `(function(){try{window.__nativeBridge=window.__nativeBridge||{};window.__nativeBridge.features=${JSON.stringify(NATIVE_BRIDGE_FEATURES)};}catch(e){}})();true;`;
+// Also posts documentStart once per real document load; onLoadStart can't
+// stand in for it, since Android fires that on SPA history changes too.
+const NATIVE_BRIDGE_BOOTSTRAP = `(function(){try{window.__nativeBridge=window.__nativeBridge||{};window.__nativeBridge.features=${JSON.stringify(NATIVE_BRIDGE_FEATURES)};window.ReactNativeWebView&&window.ReactNativeWebView.postMessage('{"type":"documentStart"}');}catch(e){}})();true;`;
 
 export default function App() {
   const insets = useSafeAreaInsets();
@@ -219,6 +229,7 @@ export default function App() {
     registerHandlers(getIAPHandlers(sendToWebView));
     registerHandlers(getStoreReviewHandlers());
     registerHandlers(getWebViewCacheHandlers(clearWebViewCacheAndReload));
+    registerHandlers(getVolumeKeyHandlers());
     // identifyUser/resetUser fan out to analytics (base), RevenueCat logIn/Out
     // (IAP wrap), then Intercom (outer wrap) — one identity event, three sinks.
     registerHandlers(
@@ -234,11 +245,13 @@ export default function App() {
     );
     const unsubscribeStoreReview = startStoreReviewWatcher();
     const unsubscribeOrientation = startOrientationWatcher();
+    const unsubscribeVolumeKeys = registerVolumeKeyEventListeners(sendToWebView);
     return () => {
       unsubscribeAudio();
       unsubscribeIntercom();
       unsubscribeStoreReview();
       unsubscribeOrientation();
+      unsubscribeVolumeKeys();
       clearHandlers();
     };
   }, [
